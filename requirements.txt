@@ -1,0 +1,5 @@
+PyMySQL~=1.1.0
+DBUtils~=3.0.3
+python-dotenv~=1.0.0
+setuptools~=65.5.1
+cryptography=42.0.2

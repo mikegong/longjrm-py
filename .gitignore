@@ -1,0 +1,9 @@
+.env
+.idea
+.vscode
+longjrm.log
+dbinfos_dev.json
+longjrm.egg-info
+__pycache__
+build
+dist

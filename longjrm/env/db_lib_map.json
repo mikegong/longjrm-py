@@ -1,0 +1,7 @@
+{
+  "mysql": "pymysql",
+  "postgres": "psycopg2",
+  "postgresql": "psycopg2",
+  "mongodb": "pymongo",
+  "mongodb+srv": "pymongo"
+}
