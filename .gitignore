@@ -2,7 +2,7 @@
 .idea
 .vscode
 longjrm.log
-dbinfos_dev.json
+dbs.json
 longjrm.egg-info
 __pycache__
 build
