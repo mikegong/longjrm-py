@@ -65,7 +65,6 @@ class DatabaseConnection(object):
                                               database=self.database,
                                               connect_timeout=self.connect_timeout,
                                               autocommit=self.autocommit,
-                                              cursorclass=db_module.cursors.DictCursor
                                               )
                 logger.info(f"{connection_msg}, connection thread: {self.conn.thread_id()}")
 

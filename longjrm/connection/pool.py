@@ -5,7 +5,7 @@ import logging
 from longjrm.config.config import DatabaseConfig
 from longjrm.config.runtime import get_config
 from longjrm.connection.dbconn import DatabaseConnection, JrmConnectionError, enforce_autocommit
-from longjrm.connection.driver_registry import sa_minimal_url
+from longjrm.connection.driver_registry import load_driver_map, sa_minimal_url
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,10 @@ class PoolBackend(str, Enum):
     
     
 class _Backend:
+    def __init__(self, db_cfg: DatabaseConfig):
+        driver_info = load_driver_map().get((db_cfg.type or "").lower())
+        self.database_module = driver_info.dbapi if driver_info else None
+
     def get_client(self): raise NotImplementedError
     def close_client(self): raise NotImplementedError
     def dispose(self): raise NotImplementedError
@@ -25,6 +29,7 @@ class _Backend:
 
 class _SABackend(_Backend):
     def __init__(self, db_cfg: DatabaseConfig, sa_opts: Optional[Mapping[str, Any]]):
+        super().__init__(db_cfg)
         from sqlalchemy import create_engine, event
 
         self._cfg = db_cfg
@@ -59,12 +64,12 @@ class _SABackend(_Backend):
             enforce_autocommit(dbapi_conn, self._cfg.type)
 
     def get_client(self):
-        raw = self._engine.raw_connection()  # .close() -> returns to SA QueuePool
+        raw = self._engine.raw_connection() 
         logger.debug(f"Got SQLAlchemy connection for {self._cfg.type} '{self._cfg.database}'")
         return {"conn": raw, 
                 "database_type": self._cfg.type, 
                 "database_name": self._cfg.database,
-                "db_lib": "sqlalchemy"}
+                "db_lib": self.database_module}
 
     def dispose(self) -> None:
         try:
@@ -76,6 +81,7 @@ class _SABackend(_Backend):
 # --------- DBUtils PooledDB backend ---------
 class _DBUtilsBackend(_Backend):
     def __init__(self, db_cfg: DatabaseConfig, dbutils_opts: Optional[Mapping[str, Any]]):
+        super().__init__(db_cfg)
         from dbutils.pooled_db import PooledDB
 
         self._cfg = db_cfg
@@ -105,7 +111,7 @@ class _DBUtilsBackend(_Backend):
         return {"conn": raw, 
                 "database_type": self._cfg.type, 
                 "database_name": self._cfg.database,
-                "db_lib": "dbutils"
+                "db_lib": self.database_module
                 }
 
     def dispose(self) -> None:

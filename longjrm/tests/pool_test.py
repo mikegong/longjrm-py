@@ -14,9 +14,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-#db_key = "postgres-test"
+db_key = "postgres-test"
 #db_key = "mysql-test"
-db_key = "mongodb-test"
+#db_key = "mongodb-test"
 
 cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
 # inject the configuration into the runtime
@@ -24,7 +24,7 @@ configure(cfg)
 db_cfg = cfg.require(db_key)
 
 pools = {}
-pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
+pools[db_key] = Pool.from_config(db_cfg, PoolBackend.SQLALCHEMY)
 client = pools[db_key].get_client()
 
 db = Db(client)

@@ -23,7 +23,7 @@ class Db:
         self.conn = client['conn']
         self.database_type = client['database_type']
         self.database_name = client['database_name']
-        if client['db_lib'] == 'dbutils':  # universal database connection from dbutils lib
+        if client['db_lib'] in ['psycopg2', 'pymysql']: 
             self.placeholder = '%s'  # placeholder for query value
         else:
             self.placeholder = '?'  # temporary placeholder for future database libraries
@@ -351,14 +351,13 @@ class Db:
                 # define the data format of return data set as a list of dictionary like [{"column": value}]
                 if self.database_type in ['postgres', 'postgresql']:
                     import psycopg2.extras
-                    cur = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                    cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                 else:
                     import pymysql
                     cur = self.conn.cursor(pymysql.cursors.DictCursor)
                 # scan query input values to exclude CURRENT keyword
                 if arr_values:
                     sql, values = Db.inject_current(sql, arr_values, self.placeholder)
-
                 cur.execute(sql, arr_values)
                 rows = cur.fetchall()
                 columns = list(rows[0].keys()) if len(rows) > 0 else []
