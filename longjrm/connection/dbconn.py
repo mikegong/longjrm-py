@@ -1,9 +1,8 @@
 import logging
 import importlib
 import traceback
-from pathlib import Path
-from longjrm.config.runtime import get_config, require_db
-from longjrm.config.config import JrmConfig, DatabaseConfig
+from longjrm.config.runtime import get_config
+from longjrm.config.config import DatabaseConfig
 from longjrm.connection.dsn_parts_helper import dsn_to_parts
 from longjrm.connection.driver_registry import load_driver_map
 
@@ -105,14 +104,6 @@ class DatabaseConnection(object):
             logger.error(f"{connection_error_msg}: {e}")
             logger.error(traceback.format_exc())
             raise JrmConnectionError(e.args)
-
-    def get_client(self):
-        # compose connection client, including connection, database type, database name attributes
-
-        self.client = {"conn": self.conn, "database_type": self.database_type, "database_name": self.database,
-                       "db_lib": self.db_lib_map[self.database_type]}
-
-        return self.client
 
     def set_autocommit(self, autocommit: bool):
         try:

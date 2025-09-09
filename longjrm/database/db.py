@@ -12,9 +12,8 @@ import re
 import json
 import datetime
 import logging
-from longjrm.config import JrmConfig, DatabaseConfig
+from longjrm.config.runtime import get_config
 
-import longjrm.load_env as jrm_env
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +27,8 @@ class Db:
             self.placeholder = '%s'  # placeholder for query value
         else:
             self.placeholder = '?'  # temporary placeholder for future database libraries
+        jrm_cfg = get_config()
+        self.data_fetch_limit = jrm_cfg.data_fetch_limit
 
     @staticmethod
     def check_current_keyword(string):
@@ -289,7 +290,7 @@ class Db:
     def select(self, table, columns=None, where=None, options=None):
         try:
             if self.database_type in ['mongodb', 'mongodb+srv']:
-                select_query = Db.mongo_select_constructor(columns, where, options)
+                select_query = self.mongo_select_constructor(columns, where, options)
                 return self.query(select_query, [], table)
             else:
                 select_query, arr_values = self.select_constructor(table, columns, where, options)
@@ -304,7 +305,7 @@ class Db:
             columns = ["*"]
         if options is None:
             options = {
-                "limit": jrm_env.config.get('DATABASE', 'DATA_FETCH_LIMIT'),
+                "limit": self.data_fetch_limit,
                 "order_by": []
             }
 
@@ -319,8 +320,7 @@ class Db:
         select_query = "select " + str_column + " from " + table + str_where + str_order + str_limit
         return select_query, arr_values
 
-    @staticmethod
-    def mongo_select_constructor(columns=None, where=None, options=None):
+    def mongo_select_constructor(self, columns=None, where=None, options=None):
         select_query = {}
 
         if where:
@@ -333,7 +333,7 @@ class Db:
             if options.get('limit') != 0:
                 select_query['limit'] = options.get('limit')
         else:
-            select_query['limit'] = int(jrm_env.config.get('DATABASE', 'DATA_FETCH_LIMIT'))
+            select_query['limit'] = self.data_fetch_limit
 
         if options and options.get('order_by'):
             select_query['sort'] = {item.split(' ')[0]: -1 if item.split(' ')[1] == 'desc' else 1 for item in options['order_by']}
@@ -367,7 +367,7 @@ class Db:
                 return {"data": rows, "columns": columns, "count": len(rows)}
 
             elif self.database_type in ['mongodb', 'mongodb+srv']:
-                cur = self.conn[collection_name].find(**sql)
+                cur = self.conn[self.database_name][collection_name].find(**sql)
                 rows = []
                 for row in cur:
                     rows.append(row)

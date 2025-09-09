@@ -100,11 +100,12 @@ class DatabaseConfig:
 class JrmConfig:
     _databases: Dict[str, DatabaseConfig]
     default_db: str | None = None
-    connect_timeout: float = 40.0
+    connect_timeout: int = 40
     data_fetch_limit: int = 1000
     min_pool_size: int = 1
     max_pool_size: int = 10
     max_cached_conn: int = 5
+    pool_timeout: int = 60
 
     def require(self, name: str | None = None) -> DatabaseConfig:
         dbmap = self._databases
@@ -156,11 +157,12 @@ class JrmConfig:
         return cls(
             _databases=parsed,
             default_db=cfg.get("default_db") or cfg.get("db_default"),
-            connect_timeout=_i("jrm_db_timeout", 40.0),
+            connect_timeout=_i("jrm_db_timeout", 40),
             data_fetch_limit=_i("data_fetch_limit", 1000),
             min_pool_size=_i("min_conn_pool_size", 1),
             max_pool_size=_i("max_conn_pool_size", 10),
             max_cached_conn=_i("max_cached_conn", 5),
+            pool_timeout=_i("pool_timeout", 60),
         )
 
     @classmethod
@@ -175,7 +177,7 @@ class JrmConfig:
                 * or parts: {P}DB_TYPE {P}DB_HOST {P}DB_PORT {P}DB_USER {P}DB_PASSWORD {P}DB_NAME
           - Selector / tuning:
               {P}DB_DEFAULT, {P}JRM_DB_TIMEOUT, {P}DATA_FETCH_LIMIT, {P}MIN_CONN_POOL_SIZE,
-              {P}MAX_CONN_POOL_SIZE, {P}MAX_CACHED_CONN
+              {P}MAX_CONN_POOL_SIZE, {P}MAX_CACHED_CONN, {P}POOL_TIMEOUT
         Precedence: DATABASES_JSON > DBINFOS_PATH > single-DB vars.
         """
         get = os.getenv
@@ -243,9 +245,10 @@ class JrmConfig:
         return cls(
             _databases=parsed,
             default_db=get(prefix + "DB_DEFAULT") or (key if key in parsed else None),
-            connect_timeout=_i("JRM_DB_TIMEOUT", 40.0),
+            connect_timeout=_i("JRM_DB_TIMEOUT", 40),
             data_fetch_limit=_i("DATA_FETCH_LIMIT", 1000),
             min_pool_size=_i("MIN_CONN_POOL_SIZE", 1),
             max_pool_size=_i("MAX_CONN_POOL_SIZE", 10),
             max_cached_conn=_i("MAX_CACHED_CONN", 5),
+            pool_timeout=_i("POOL_TIMEOUT", 60),
         )

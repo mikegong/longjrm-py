@@ -1,9 +1,9 @@
 from __future__ import annotations
 from typing import Any, Mapping, Optional
-from dataclasses import dataclass
 from enum import Enum
 import logging
-from longjrm.config import JrmConfig, DatabaseConfig
+from longjrm.config.config import DatabaseConfig
+from longjrm.config.runtime import get_config
 from longjrm.connection.dbconn import DatabaseConnection, JrmConnectionError, enforce_autocommit
 from longjrm.connection.driver_registry import sa_minimal_url
 
@@ -19,20 +19,25 @@ class PoolBackend(str, Enum):
     
 class _Backend:
     def get_client(self): raise NotImplementedError
+    def close_client(self): raise NotImplementedError
     def dispose(self): raise NotImplementedError
-
+    def get_config(self) -> DatabaseConfig: return self._cfg
 
 class _SABackend(_Backend):
     def __init__(self, db_cfg: DatabaseConfig, sa_opts: Optional[Mapping[str, Any]]):
         from sqlalchemy import create_engine, event
 
         self._cfg = db_cfg
+        jrm_cfg = get_config()
+        self.connect_timeout = jrm_cfg.connect_timeout
 
         # Minimal URL that only selects the SQLAlchemy dialect+driver.
         # Real DB-API connections are created by dbconn via creator=...
         url = sa_minimal_url(db_cfg.type, override_driver=(db_cfg.options or {}).get("sa_driver"))
 
         opts: dict[str, Any] = {
+            "pool_size": jrm_cfg.max_pool_size,
+            "pool_timeout": jrm_cfg.pool_timeout,
             "future": True,
             "pool_pre_ping": True,
             "pool_reset_on_return": "rollback",  # safe with autocommit-by-default policy
@@ -46,6 +51,8 @@ class _SABackend(_Backend):
             **opts,
         )
 
+        logger.info(f"Created SQLAlchemy engine for {self._cfg.type} '{self._cfg.database}'")
+        
         # Normalize connection state such as autocommit=True on checkout in ONE place (dbconn policy).
         @event.listens_for(self._engine, "checkout")
         def _on_checkout(dbapi_conn, conn_record, conn_proxy):
@@ -53,13 +60,17 @@ class _SABackend(_Backend):
 
     def get_client(self):
         raw = self._engine.raw_connection()  # .close() -> returns to SA QueuePool
+        logger.debug(f"Got SQLAlchemy connection for {self._cfg.type} '{self._cfg.database}'")
         return {"conn": raw, 
                 "database_type": self._cfg.type, 
                 "database_name": self._cfg.database,
                 "db_lib": "sqlalchemy"}
 
     def dispose(self) -> None:
-        self._engine.dispose()
+        try:
+            self._engine.dispose()
+        except Exception:
+            pass
 
 
 # --------- DBUtils PooledDB backend ---------
@@ -68,10 +79,13 @@ class _DBUtilsBackend(_Backend):
         from dbutils.pooled_db import PooledDB
 
         self._cfg = db_cfg
+        jrm_cfg = get_config()
+        self.connect_timeout = jrm_cfg.connect_timeout
+
         opts: dict[str, Any] = {
-            "maxconnections": (db_cfg.options or {}).get("MAX_CONN_POOL_SIZE", 10),
-            "mincached":      (db_cfg.options or {}).get("MIN_CONN_POOL_SIZE", 1),
-            "maxcached":      (db_cfg.options or {}).get("MAX_CACHED_CONN", 5),
+            "maxconnections": (jrm_cfg.max_pool_size),
+            "mincached":      (jrm_cfg.min_pool_size),
+            "maxcached":      (jrm_cfg.max_cached_conn),
             "blocking": True,  # wait when exhausted
             "ping": 1,         # liveness on checkout
             "reset": True,     # rollback on return; does not change autocommit
@@ -81,11 +95,13 @@ class _DBUtilsBackend(_Backend):
 
         # Fresh DatabaseConnection per checkout -> no shared mutable state
         self._pool = PooledDB(creator=lambda: DatabaseConnection(self._cfg).connect(), **opts)
+        logger.info(f"Created DBUtils pool for {self._cfg.type} '{self._cfg.database}'")
 
     def get_client(self):
         raw = self._pool.connection()  # .close() -> returns to DBUtils pool
         # Align state on checkout to match SA behavior (optional but recommended)
         enforce_autocommit(raw, self._cfg)
+        logger.debug(f"Got DBUtils connection for {self._cfg.type} '{self._cfg.database}'")
         return {"conn": raw, 
                 "database_type": self._cfg.type, 
                 "database_name": self._cfg.database,
@@ -103,6 +119,7 @@ class _MongoBackend(_Backend):
     def __init__(self, db_cfg: DatabaseConfig):
         self._cfg = db_cfg
         self._client = DatabaseConnection(db_cfg).connect()  # returns a MongoClient
+        logger.info(f"Created MongoDB client for {self._cfg.type} '{self._cfg.database}'")
 
     def get_client(self):
         # Do NOT close on context exit; MongoClient.close() would tear down the shared pool
@@ -123,21 +140,14 @@ class _MongoBackend(_Backend):
 class Pool:
     """
     Unified Pool over independent backends (SQLAlchemy / DBUtils / MongoDB).
-
-    Example:
-        pool = Pool.from_config(cfg, "primary", pool_backend=PoolBackend.DBUTILS)
-        with pool.get_client() as db:
-            with db.cursor() as cur:
-                cur.execute("SELECT 1")
-            db.commit()
-
-        mpool = Pool.from_config(cfg, "mongo", pool_backend=PoolBackend.MONGODB)
-        with mpool.get_client() as m:
-            m.conn["mydb"].users.insert_one({"ok": 1})
     """
     def __init__(self, backend_obj: _Backend):
         self._b = backend_obj
 
+    @property
+    def config(self) -> DatabaseConfig:
+        return self._b._cfg
+      
     @classmethod
     def from_config(
         cls,
@@ -158,6 +168,13 @@ class Pool:
 
     def get_client(self):
         return self._b.get_client()
+
+    def close_client(self, client: dict[str, Any]):
+        try:
+            client["conn"].close()
+            logger.info(f"Closed {self._b._cfg.type} connection to {self._b._cfg.database}")
+        except Exception as e:
+            logger.warning(f"Failed to close connection {self._b._cfg.type} to '{self._b._cfg.database}'. Error: {e}")
 
     def dispose(self) -> None:
         self._b.dispose()
