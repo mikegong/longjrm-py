@@ -11,8 +11,12 @@ where condition - json data that defines where column and value pairs
 import re
 import json
 import datetime
+import logging
+from longjrm.config import JrmConfig, DatabaseConfig
+
 import longjrm.load_env as jrm_env
 
+logger = logging.getLogger(__name__)
 
 class Db:
 
@@ -20,7 +24,6 @@ class Db:
         self.conn = client['conn']
         self.database_type = client['database_type']
         self.database_name = client['database_name']
-        self.logger = jrm_env.logger
         if client['db_lib'] == 'dbutils':  # universal database connection from dbutils lib
             self.placeholder = '%s'  # placeholder for query value
         else:
@@ -292,7 +295,7 @@ class Db:
                 select_query, arr_values = self.select_constructor(table, columns, where, options)
                 return self.query(select_query, arr_values)
         except Exception as e:
-            self.logger.error(f"select method failed: {e}")
+            logger.error(f"select method failed: {e}")
             raise
 
     def select_constructor(self, table, columns=None, where=None, options=None):
@@ -340,7 +343,7 @@ class Db:
     def query(self, sql, arr_values=None, collection_name=None):
         # collection_name is used for MongoDb only
         # for MongoDb query, sql will be a dictionary that contains query parameters, we just re-use the name of sql
-        self.logger.debug(f"Query: {sql}")
+        logger.debug(f"Query: {sql}")
 
         try:
             if self.database_type in ['mysql', 'postgres', 'postgresql']:
@@ -360,7 +363,7 @@ class Db:
                 rows = cur.fetchall()
                 columns = list(rows[0].keys()) if len(rows) > 0 else []
                 cur.close()
-                self.logger.info(f"Query completed successfully with {len(rows)} rows returned")
+                logger.info(f"Query completed successfully with {len(rows)} rows returned")
                 return {"data": rows, "columns": columns, "count": len(rows)}
 
             elif self.database_type in ['mongodb', 'mongodb+srv']:
@@ -369,12 +372,12 @@ class Db:
                 for row in cur:
                     rows.append(row)
                 columns = list(rows[0].keys()) if len(rows) > 0 else []
-                self.logger.info(f"Query completed successfully with {len(rows)} documents returned")
+                logger.info(f"Query completed successfully with {len(rows)} documents returned")
                 return {"data": rows, "columns": columns, "count": len(rows)}
 
             else:
                 raise ValueError(f"Unsupported database type: {self.database_type}")
 
         except Exception as e:
-            self.logger.error(f"query method failed: {e}")
+            logger.error(f"query method failed: {e}")
             raise

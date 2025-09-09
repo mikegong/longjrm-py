@@ -1,8 +1,7 @@
 import logging
-from dotenv import load_dotenv, find_dotenv
-from longjrm.config import JrmConfig
-
+from longjrm.config.config import JrmConfig
 from longjrm.connection.dbconn import DatabaseConnection
+from longjrm.config.runtime import configure
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -13,12 +12,13 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-load_dotenv(find_dotenv())  
-
-# db_key = "postgres-test"
+#db_key = "postgres-test"
+#db_key = "mysql-test"
 db_key = "mongodb-test"
 
-cfg = JrmConfig.from_env("JRM_")
+cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+# inject the configuration into the runtime
+configure(cfg)
 db_cfg = cfg.require(db_key)
 
 db_connection = DatabaseConnection(db_cfg)

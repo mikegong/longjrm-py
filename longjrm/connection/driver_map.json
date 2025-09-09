@@ -1,0 +1,10 @@
+{
+    "postgres":   { "dbapi": "psycopg2", "sa_dialect": "postgresql", "sa_driver": "psycopg2" },
+    "postgresql": { "dbapi": "psycopg2", "sa_dialect": "postgresql", "sa_driver": "psycopg2" },
+    "mysql":      { "dbapi": "pymysql",  "sa_dialect": "mysql",      "sa_driver": "pymysql"  },
+    "mariadb":    { "dbapi": "pymysql",  "sa_dialect": "mysql",      "sa_driver": "pymysql"  },
+    "sqlite":     { "dbapi": "sqlite3",  "sa_dialect": "sqlite",     "sa_driver": null       },
+    "mongodb":    { "dbapi": "pymongo",  "sa_dialect": null,         "sa_driver": null       },
+    "mongodb+srv":{ "dbapi": "pymongo",  "sa_dialect": null,         "sa_driver": null       }
+  }
+  

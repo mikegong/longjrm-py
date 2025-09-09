@@ -160,3 +160,8 @@ def dsn_to_parts(dsn: str) -> Dict[str, Any]:
     out["port"] = int(u.port) if u.port is not None else None
     out["database"] = u.path.lstrip("/") or None
     return out
+
+
+def type_from_dsn(dsn: str) -> str | None:
+    scheme = urlparse(dsn).scheme
+    return scheme.split("+", 1)[0] if scheme else None

@@ -2,21 +2,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Dict
 from pathlib import Path
-from urllib.parse import urlparse
 import os, json, re
 from types import MappingProxyType
 from typing import Mapping
+from longjrm.connection.dsn_parts_helper import dsn_to_parts, type_from_dsn
 
 
-try:
-    # your pluggable registry (recommended)
-    from .drivers import get_driver, type_from_dsn
-except Exception:
-    # minimal fallbacks; replace with real registry
-    def get_driver(name: str): return None
-    def type_from_dsn(dsn: str) -> str | None:
-        sch = urlparse(dsn).scheme
-        return sch.split("+", 1)[0] if sch else None
 
 class JrmConfigurationError(ValueError): ...
 
@@ -76,82 +67,62 @@ class DatabaseConfig:
             t = (d.get("type") or type_from_dsn(dsn) or "")
             if not t:
                 raise JrmConfigurationError("Could not infer database type from DSN; set 'type'.")
+
+            # Extract options from DSN query parameters
+            dsn_parts = dsn_to_parts(dsn)
+            dsn_options = dsn_parts.get('query', {})
+            
+            # Merge explicit options with DSN options (explicit takes precedence)
+            merged_options = {**dsn_options, **(d.get("options", {}) or {})}
+    
             return cls(
                 type=t.split("+", 1)[0],
                 dsn=dsn,
-                options=d.get("options", {}) or {}
+                options=merged_options
             )
 
         db_type = d.get("type")
         if not db_type:
             raise JrmConfigurationError("Either 'dsn' or 'type' is required for a database entry.")
 
-        # If a driver is registered, let it validate (& optionally build DSN)
-        drv = get_driver(db_type)
-        built_dsn: str | None = None
-        port: int | None = None
-
-        if drv:
-            try:
-                drv.validate(d)  # driver defines required fields
-            except Exception as e:
-                raise JrmConfigurationError(f"Invalid config for {db_type}: {e}") from e
-            if drv.build_dsn:
-                built_dsn = drv.build_dsn(d)
-            if "port" in d and d["port"] is not None:
-                port = _to_int("port", d["port"])
-            else:
-                port = drv.default_port
-        else:
-            # Unknown type: minimal common checks (still supported)
-            if db_type.lower() == "sqlite":
-                if not d.get("database"):
-                    raise JrmConfigurationError("sqlite requires 'database' (file path or URI)")
-            else:
-                for k in ("host", "user", "password", "database"):
-                    if not d.get(k):
-                        raise JrmConfigurationError(f"Missing field '{k}' for type={db_type}")
-            port = _to_int("port", d["port"]) if d.get("port") is not None else None
-
         return cls(
             type=db_type,
-            dsn=built_dsn,
+            dsn=dsn,
             host=d.get("host"),
             user=d.get("user"),
             password=d.get("password"),
-            port=port,
+            port=d.get("port"),
             database=d.get("database"),
             options=d.get("options", {}) or {},
         )
 
 @dataclass(frozen=True, slots=True)
 class JrmConfig:
-    databases: Dict[str, DatabaseConfig]
+    _databases: Dict[str, DatabaseConfig]
     default_db: str | None = None
-    # pool & timeouts (seconds; keep units consistent)
-    connect_timeout_s: float = 40.0
-    fetch_limit: int = 1000
-    min_pool_size: int = 2
-    max_pool_size: int = 50
-    acquire_timeout_s: float = 10.0
-    destroy_timeout_s: float = 5.0
+    connect_timeout: float = 40.0
+    data_fetch_limit: int = 1000
+    min_pool_size: int = 1
+    max_pool_size: int = 10
+    max_cached_conn: int = 5
 
     def require(self, name: str | None = None) -> DatabaseConfig:
-        key = name or self.default_db or next(iter(self.databases))
+        dbmap = self._databases
+        key = name or self.default_db or next(iter(dbmap ))
         try:
-            return self.databases[key]
+            return dbmap [key]
         except KeyError as e:
             raise JrmConfigurationError(f"Unknown database key: {key!r}") from e
 
     def databases(self) -> Mapping[str, DatabaseConfig]:
         """Read-only view of all configured databases."""
-        return MappingProxyType(self.databases)
+        return MappingProxyType(self._databases)
     
     @classmethod
     def from_files(cls, config_path: str | None = None, dbinfos_path: str | None = None) -> "JrmConfig":
         """
         Reads:
-          - config_path JSON: may contain {"default_db": "...", "databases": {...}, pool/timeout fields}
+          - config_path JSON: may contain {"default_db": "...", "databases": {...}, timeout fields}
           - dbinfos_path JSON: plain {"name": {...}} map of databases
         Merge rule: dbinfos first, then config['databases'] overrides on key conflicts.
         Supports per-entry 'dsn' OR 'type'+parts in both files. Expands ${ENV_VAR}.
@@ -183,14 +154,13 @@ class JrmConfig:
             return int(v) if v is not None else default
 
         return cls(
-            databases=parsed,
-            default_db=cfg.get("db_default"),
-            connect_timeout_s=_f("db_timeout", 40.0),
-            fetch_limit=_i("data_fetch_limit", 1000),
-            min_pool_size=_i("min_conn_pool_size", 2),
-            max_pool_size=_i("max_conn_pool_size", 50),
-            acquire_timeout_s=_f("acquire_timeout", 10.0),
-            destroy_timeout_s=_f("destroy_timeout", 5.0),
+            _databases=parsed,
+            default_db=cfg.get("default_db") or cfg.get("db_default"),
+            connect_timeout=_i("jrm_db_timeout", 40.0),
+            data_fetch_limit=_i("data_fetch_limit", 1000),
+            min_pool_size=_i("min_conn_pool_size", 1),
+            max_pool_size=_i("max_conn_pool_size", 10),
+            max_cached_conn=_i("max_cached_conn", 5),
         )
 
     @classmethod
@@ -204,8 +174,8 @@ class JrmConfig:
                 * {P}DB_DSN
                 * or parts: {P}DB_TYPE {P}DB_HOST {P}DB_PORT {P}DB_USER {P}DB_PASSWORD {P}DB_NAME
           - Selector / tuning:
-              {P}DB_DEFAULT, {P}DB_TIMEOUT, {P}DATA_FETCH_LIMIT, {P}MIN_CONN_POOL_SIZE,
-              {P}MAX_CONN_POOL_SIZE, {P}ACQUIRE_TIMEOUT, {P}DESTROY_TIMEOUT
+              {P}DB_DEFAULT, {P}JRM_DB_TIMEOUT, {P}DATA_FETCH_LIMIT, {P}MIN_CONN_POOL_SIZE,
+              {P}MAX_CONN_POOL_SIZE, {P}MAX_CACHED_CONN
         Precedence: DATABASES_JSON > DBINFOS_PATH > single-DB vars.
         """
         get = os.getenv
@@ -271,12 +241,11 @@ class JrmConfig:
             return int(v) if v is not None else default
 
         return cls(
-            databases=parsed,
+            _databases=parsed,
             default_db=get(prefix + "DB_DEFAULT") or (key if key in parsed else None),
-            connect_timeout_s=_f("DB_TIMEOUT", 40.0),
-            fetch_limit=_i("DATA_FETCH_LIMIT", 1000),
-            min_pool_size=_i("MIN_CONN_POOL_SIZE", 2),
-            max_pool_size=_i("MAX_CONN_POOL_SIZE", 50),
-            acquire_timeout_s=_f("ACQUIRE_TIMEOUT", 10.0),
-            destroy_timeout_s=_f("DESTROY_TIMEOUT", 5.0),
+            connect_timeout=_i("JRM_DB_TIMEOUT", 40.0),
+            data_fetch_limit=_i("DATA_FETCH_LIMIT", 1000),
+            min_pool_size=_i("MIN_CONN_POOL_SIZE", 1),
+            max_pool_size=_i("MAX_CONN_POOL_SIZE", 10),
+            max_cached_conn=_i("MAX_CACHED_CONN", 5),
         )
