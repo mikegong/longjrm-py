@@ -74,8 +74,9 @@ class _SABackend(_Backend):
     def dispose(self) -> None:
         try:
             self._engine.dispose()
+            logger.info(f"Disposed SQLAlchemy engine for {self._cfg.type} '{self._cfg.database}'")
         except Exception:
-            pass
+            logger.error(f"Failed to dispose SQLAlchemy engine for {self._cfg.type} '{self._cfg.database}'")
 
 
 # --------- DBUtils PooledDB backend ---------
@@ -117,8 +118,9 @@ class _DBUtilsBackend(_Backend):
     def dispose(self) -> None:
         try:
             self._pool.close()
+            logger.info(f"Disposed DBUtils pool for {self._cfg.type} '{self._cfg.database}'")
         except Exception:
-            pass
+            logger.error(f"Failed to dispose DBUtils pool for {self._cfg.type} '{self._cfg.database}'")
 
 
 class _MongoBackend(_Backend):

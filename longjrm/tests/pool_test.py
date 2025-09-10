@@ -47,3 +47,4 @@ else:
 # Make sure to close the connection
 
 pools[db_key].close_client(client)
+pools[db_key].dispose()
