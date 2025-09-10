@@ -128,13 +128,70 @@ Each database operation requires a "client" object containing:
 
 ## Testing
 
+### Setup for Testing
+
+First, install the package in development mode:
+
+```bash
+# Install longjrm in development mode
+pip install -e .
+```
+
+### Configure Test Databases
+
+Test scripts expect database configurations in `test_config/dbinfos.json`. Copy from `test_config/dbinfos_example.json` and update with actual credentials:
+
+```json
+{
+    "postgres-test": {
+        "type": "postgres",
+        "host": "localhost",
+        "user": "username",
+        "password": "password",
+        "port": 5432,
+        "database": "test"
+    },
+    "mysql-test": {
+        "type": "mysql",
+        "host": "localhost",
+        "user": "username", 
+        "password": "password",
+        "port": 3306,
+        "database": "test"
+    },
+    "mongodb-test": {
+        "type": "mongodb",
+        "host": "localhost",
+        "port": 27017,
+        "database": "test"
+    }
+}
+```
+
+### Run Tests
+
 ```bash
 # Run individual test files
 python longjrm/tests/pool_test.py
 python longjrm/tests/connection_test.py
+python longjrm/tests/insert_test.py
+
+# Or run from project root without installation (for quick testing)
+cd longjrm-py
+python longjrm/tests/insert_test.py
 ```
 
-Test scripts expect database configurations in `longjrm/env/dbinfos_dev.json`. Copy from `dbinfos_dev_example.json` and update with actual credentials.
+### Test Coverage
+
+- **`connection_test.py`**: Basic database connectivity testing
+- **`pool_test.py`**: Connection pooling and select operations testing  
+- **`insert_test.py`**: Comprehensive insert functionality testing
+  - Single record insertion
+  - Bulk record insertion
+  - MongoDB document operations
+  - Error handling and edge cases
+  - CURRENT keyword support
+  - PostgreSQL RETURNING clause support
 
 ## Design Patterns
 

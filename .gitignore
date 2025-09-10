@@ -1,6 +1,7 @@
 .env
 .idea
 .vscode
+.claude
 longjrm.log
 jrm.config.json
 dbinfos.json

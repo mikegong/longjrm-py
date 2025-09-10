@@ -12,6 +12,7 @@ import re
 import json
 import datetime
 import logging
+import traceback
 from longjrm.config.runtime import get_config
 
 
@@ -61,6 +62,35 @@ class Db:
         for keyword in keywords:
             string = Db.case_insensitive_replace(string, keyword, keyword.replace('`', ''))
         return string
+
+    @staticmethod
+    def escape_sql_for_database(sql, database_type, placeholder):
+        """
+        Escape SQL string for database-specific requirements
+        
+        Args:
+            sql: SQL string to escape
+            database_type: Type of database ('postgres', 'mysql', etc.)
+            placeholder: Placeholder character used ('%s', '?', etc.)
+        
+        Returns:
+            Escaped SQL string
+        """
+        if database_type in ['postgres', 'postgresql']:
+            # For PostgreSQL, escape literal % characters that are not part of placeholders
+            # Replace standalone % with %% (escape them) but leave %s placeholders alone
+            import re
+            # This regex matches % that are NOT followed by 's' (i.e., not %s placeholders)
+            sql = re.sub(r'%(?!s)', '%%', sql)
+            
+        elif database_type in ['mysql']:
+            # MySQL with PyMySQL also needs % characters escaped when using parameterized queries
+            # Replace standalone % with %% (escape them) but leave %s placeholders alone
+            import re
+            # This regex matches % that are NOT followed by 's' (i.e., not %s placeholders)
+            sql = re.sub(r'%(?!s)', '%%', sql)
+            
+        return sql
 
     @staticmethod
     def datalist_to_dataseq(datalist, bulk_size=0):
@@ -139,6 +169,10 @@ class Db:
 
     @staticmethod
     def replace_nth(string, old, new, n):
+        if n <= 0:
+            logger.error(f"replace_nth: invalid n={n} (must be >= 1)")
+            return string
+            
         new_string = ''
         items = string.split(old)
         if len(items) - 1 >= n:
@@ -149,21 +183,34 @@ class Db:
                 else:
                     if i < len(items) - 1:
                         new_string += old
+        else:
+            logger.error(f"replace_nth: requested replacement #{n} but only found {len(items)-1} occurrences of '{old}' in '{string}'")
+            return string
+            
         return new_string
 
     @staticmethod
     def inject_current(sql, values, placeholder):
         # For query that contains placeholder such as question mark but values contains CURRENT keyword,
         # replace the question mark with the CURRENT value
+        if not values:
+            return Db.unescape_current_keyword(sql), values
+            
+        logger.debug(f"inject_current: processing {len(values)} values with placeholder '{placeholder}'")
+        
         new_values = []
-        j = 0
+        placeholder_position = 1  # Track which placeholder we're working on (1-based for replace_nth)
+        
         for i in range(len(values)):
             if isinstance(values[i], str) and Db.check_current_keyword(values[i]):
-                sql = Db.replace_nth(sql, placeholder, values[i], j + 1)
-                j -= 1
+                logger.debug(f"Found CURRENT keyword: '{values[i]}', replacing placeholder #{placeholder_position}")
+                # Replace placeholder with CURRENT keyword - don't increment position since we consumed a placeholder
+                sql = Db.replace_nth(sql, placeholder, values[i], placeholder_position)
             else:
+                # Keep this value and increment placeholder position
                 new_values.append(values[i])
-            j += 1
+                placeholder_position += 1
+        
         return Db.unescape_current_keyword(sql), new_values
 
     @staticmethod
@@ -341,6 +388,8 @@ class Db:
         return select_query
 
     def query(self, sql, arr_values=None, collection_name=None):
+        # execute query with small result set, return entire result set, etc.
+        # arr_values: values that need to be bound to query
         # collection_name is used for MongoDb only
         # for MongoDb query, sql will be a dictionary that contains query parameters, we just re-use the name of sql
         logger.debug(f"Query: {sql}")
@@ -357,8 +406,14 @@ class Db:
                     cur = self.conn.cursor(pymysql.cursors.DictCursor)
                 # scan query input values to exclude CURRENT keyword
                 if arr_values:
-                    sql, values = Db.inject_current(sql, arr_values, self.placeholder)
-                cur.execute(sql, arr_values)
+                    sql, processed_values = Db.inject_current(sql, arr_values, self.placeholder)
+                else:
+                    processed_values = arr_values
+                    
+                # Escape SQL for database-specific requirements
+                sql = Db.escape_sql_for_database(sql, self.database_type, self.placeholder)
+                    
+                cur.execute(sql, processed_values)
                 rows = cur.fetchall()
                 columns = list(rows[0].keys()) if len(rows) > 0 else []
                 cur.close()
@@ -366,13 +421,7 @@ class Db:
                 return {"data": rows, "columns": columns, "count": len(rows)}
 
             elif self.database_type in ['mongodb', 'mongodb+srv']:
-                cur = self.conn[self.database_name][collection_name].find(**sql)
-                rows = []
-                for row in cur:
-                    rows.append(row)
-                columns = list(rows[0].keys()) if len(rows) > 0 else []
-                logger.info(f"Query completed successfully with {len(rows)} documents returned")
-                return {"data": rows, "columns": columns, "count": len(rows)}
+                return self._execute_mongo_query(sql, collection_name)
 
             else:
                 raise ValueError(f"Unsupported database type: {self.database_type}")
@@ -380,3 +429,798 @@ class Db:
         except Exception as e:
             logger.error(f"query method failed: {e}")
             raise
+
+    def _execute_mongo_query(self, sql, collection_name):
+        """
+        Execute MongoDB query operations
+        Args:
+            sql: Dictionary containing query parameters or operation details
+            collection_name: MongoDB collection name
+        Returns:
+            Dictionary with data, columns, and count
+        """
+        collection = self.conn[self.database_name][collection_name]
+        
+        # Check if this is an insert operation
+        if isinstance(sql, dict) and "operation" in sql:
+            if sql["operation"] == "insert_one":
+                result = collection.insert_one(sql["document"])
+                if result.acknowledged:
+                    inserted_doc = collection.find_one({"_id": result.inserted_id})
+                    logger.info(f"MongoDB INSERT succeeded. 1 document inserted with _id: {result.inserted_id}")
+                    return {
+                        "data": [inserted_doc] if inserted_doc else [],
+                        "columns": list(inserted_doc.keys()) if inserted_doc else [],
+                        "count": 1
+                    }
+                else:
+                    raise Exception("MongoDB insert operation was not acknowledged")
+            elif sql["operation"] == "insert_many":
+                result = collection.insert_many(sql["documents"])
+                if result.acknowledged:
+                    inserted_docs = list(collection.find({"_id": {"$in": result.inserted_ids}}))
+                    columns = list(inserted_docs[0].keys()) if inserted_docs else []
+                    logger.info(f"MongoDB bulk INSERT succeeded. {len(result.inserted_ids)} documents inserted")
+                    return {
+                        "data": inserted_docs,
+                        "columns": columns,
+                        "count": len(result.inserted_ids)
+                    }
+                else:
+                    raise Exception("MongoDB bulk insert operation was not acknowledged")
+        else:
+            # Standard find operation
+            cur = collection.find(**sql)
+            rows = []
+            for row in cur:
+                rows.append(row)
+            columns = list(rows[0].keys()) if len(rows) > 0 else []
+            logger.info(f"Query completed successfully with {len(rows)} documents returned")
+            return {"data": rows, "columns": columns, "count": len(rows)}
+
+    def insert(self, table, data, return_columns=None):
+        """
+        Insert data in JSON format into table
+        Args:
+            table: target table name
+            data: JSON data - either:
+                  - Single record: {"col1": "val1", "col2": "val2"}
+                  - Multiple records: [{"col1": "val1"}, {"col1": "val2"}]
+            return_columns: optional list of columns to return from inserted records
+        Returns:
+            dictionary with status, message, data (empty), and total (affected rows)
+        """
+        if return_columns is None:
+            return_columns = []
+            
+        try:
+            if self.database_type in ['mongodb', 'mongodb+srv']:
+                # MongoDB uses different approach - construct operation object
+                insert_operation = self.mongo_insert_constructor(table, data)
+                return self.execute(insert_operation)
+            else:
+                # SQL databases - construct SQL and values, then use execute()
+                insert_query, arr_values = self.insert_constructor(table, data, return_columns)
+                return self.execute(insert_query, arr_values)
+        except Exception as e:
+            logger.error(f"insert method failed: {e}")
+            raise
+
+    def insert_constructor(self, table, data, return_columns=None):
+        """
+        Construct SQL INSERT statement from JSON data
+        Args:
+            table: target table name
+            data: JSON data - either single record or list of records
+            return_columns: optional list of columns to return from inserted records
+        Returns:
+            tuple of (sql_query, values_array)
+        """
+        if return_columns is None:
+            return_columns = []
+            
+        # Handle both single record and bulk insert
+        if isinstance(data, list):
+            return self._bulk_insert_constructor(table, data, return_columns)
+        else:
+            return self._single_insert_constructor(table, data, return_columns)
+
+    def _single_insert_constructor(self, table, data, return_columns=None):
+        """
+        Construct SQL INSERT statement for a single record
+        """
+        if return_columns is None:
+            return_columns = []
+            
+        str_col = ''
+        str_qm = ''
+        list_val = []
+
+        try:
+            for k in data.keys():
+                str_col += ',' + k
+                
+                # Check for CURRENT keywords BEFORE processing
+                if isinstance(data[k], str) and self.check_current_keyword(data[k]):
+                    # CURRENT keyword: add directly to SQL, no placeholder needed
+                    str_qm += ', ' + self.unescape_current_keyword(data[k])
+                else:
+                    # Regular value: process it and add placeholder
+                    data_value = self._process_insert_value(data[k])
+                    str_qm += ', ' + self.placeholder
+                    list_val.append(data_value)
+
+        except Exception as e:
+            logger.error(f"Failed to construct insert statement: {e}")
+            raise
+
+        # Remove leading comma from column list and placeholder list
+        str_col = str_col[1:] if str_col else ''
+        str_qm = str_qm[2:] if str_qm else ''  # Remove ', ' prefix
+
+        if return_columns:
+            if self.database_type == 'postgres' or self.database_type == 'postgresql':
+                # PostgreSQL uses RETURNING clause
+                sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm}) RETURNING {','.join(return_columns)}"
+            else:
+                # Default SQL standard INSERT
+                sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm})"
+        else:
+            sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm})"
+
+        return sql, list_val
+
+    def _bulk_insert_constructor(self, table, data_list, return_columns=None):
+        """
+        Construct SQL INSERT statement for bulk records using single SQL with multiple VALUES
+        """
+        if return_columns is None:
+            return_columns = []
+            
+        if not data_list:
+            return "SELECT 1 WHERE 1=0", []  # No-op query for empty list
+            
+        try:
+            # Validate all records have consistent columns
+            first_record_keys = set(data_list[0].keys())
+            for i, record in enumerate(data_list):
+                if set(record.keys()) != first_record_keys:
+                    raise ValueError(f"Record {i} has inconsistent columns. Expected: {first_record_keys}, Got: {set(record.keys())}")
+            
+            # Get columns from first record
+            columns = list(data_list[0].keys())
+            str_col = ', '.join(columns)
+            
+            # Build multiple VALUES clauses and collect all values
+            values_clauses = []
+            all_values = []
+            
+            for record in data_list:
+                record_placeholders = []
+                for col in columns:
+                    # Check for CURRENT keywords BEFORE processing
+                    if isinstance(record[col], str) and self.check_current_keyword(record[col]):
+                        # CURRENT keyword: add directly to SQL, no placeholder needed
+                        record_placeholders.append(self.unescape_current_keyword(record[col]))
+                    else:
+                        # Regular value: process it and add placeholder
+                        data_value = self._process_insert_value(record[col])
+                        record_placeholders.append(self.placeholder)
+                        all_values.append(data_value)
+                
+                values_clauses.append(f"({', '.join(record_placeholders)})")
+            
+            # Construct INSERT statement with multiple VALUES
+            values_sql = ', '.join(values_clauses)
+            
+            if return_columns and (self.database_type == 'postgres' or self.database_type == 'postgresql'):
+                sql = f"INSERT INTO {table} ({str_col}) VALUES {values_sql} RETURNING {','.join(return_columns)}"
+            else:
+                sql = f"INSERT INTO {table} ({str_col}) VALUES {values_sql}"
+            
+            return sql, all_values
+            
+        except Exception as e:
+            logger.error(f"Failed to construct bulk insert statement: {e}")
+            raise
+
+    def mongo_insert_constructor(self, table, data):
+        """
+        Construct MongoDB insert operation object
+        Args:
+            table: collection name
+            data: JSON data - either single record or list of records  
+        Returns:
+            dictionary for MongoDB insert operation
+        """
+        if isinstance(data, list):
+            return {
+                "collection": table,
+                "method": "insert_many",
+                "args": [data]
+            }
+        else:
+            return {
+                "collection": table,
+                "method": "insert_one",
+                "args": [data]
+            }
+
+    def _process_insert_value(self, value):
+        """
+        Process individual values for insert operations
+        Handles different data types: dict, list, primitives, datetime objects
+        """
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, list):
+            if len(value) > 0:
+                if isinstance(value[0], dict):
+                    return json.dumps(value, ensure_ascii=False)
+                else:
+                    return '|'.join(str(item) for item in value)
+            else:
+                return '[]'
+        elif isinstance(value, datetime.date):
+            return str(value)
+        elif isinstance(value, datetime.datetime):
+            return datetime.datetime.strftime(value, '%Y-%m-%d %H:%M:%S.%f')
+        elif isinstance(value, str):
+            if self.check_current_keyword(value):
+                # CURRENT keyword should not use placeholder
+                return value
+            else:
+                return value
+        else:
+            return value
+
+    def query_prepared(self, sql, values_list, collection_name=None):
+        """
+        Execute prepared query with multiple value sets for performance
+        Args:
+            sql: SQL statement to prepare (for SQL databases) or operation dict (for MongoDB)
+            values_list: list of value arrays for multiple executions [[val1, val2], [val3, val4], ...]
+            collection_name: MongoDB collection name (optional)
+        Returns:
+            list of dictionaries with data, columns, and count for each execution
+        """
+        if not values_list:
+            values_list = [[]]
+            
+        logger.debug(f"Prepared Query: {sql}")
+        logger.debug(f"Values count: {len(values_list)}")
+
+        try:
+            if self.database_type in ['mysql', 'postgres', 'postgresql']:
+                # SQL databases with prepared statements
+                if self.database_type in ['postgres', 'postgresql']:
+                    import psycopg2.extras
+                    cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                else:
+                    import pymysql
+                    cur = self.conn.cursor(pymysql.cursors.DictCursor)
+
+                # Prepare statement (database-specific)
+                if self.database_type in ['postgres', 'postgresql']:
+                    # PostgreSQL: Use server-side prepared statements
+                    prepared_name = f"prep_stmt_{hash(sql) % 10000}"
+                    cur.execute(f"PREPARE {prepared_name} AS {sql}")
+                    
+                    results = []
+                    for values in values_list:
+                        if values:
+                            processed_sql, processed_values = Db.inject_current(f"EXECUTE {prepared_name}", values, self.placeholder)
+                            # Convert placeholders for EXECUTE statement
+                            execute_sql = f"EXECUTE {prepared_name}({', '.join(['%s'] * len(processed_values))})"
+                            cur.execute(execute_sql, processed_values)
+                        else:
+                            cur.execute(f"EXECUTE {prepared_name}")
+                        
+                        rows = cur.fetchall()
+                        columns = list(rows[0].keys()) if len(rows) > 0 else []
+                        results.append({"data": rows, "columns": columns, "count": len(rows)})
+                    
+                    # Clean up prepared statement
+                    cur.execute(f"DEALLOCATE {prepared_name}")
+                    
+                else:
+                    # MySQL: Use client-side prepared statements
+                    results = []
+                    for values in values_list:
+                        if values:
+                            processed_sql, processed_values = Db.inject_current(sql, values, self.placeholder)
+                            cur.execute(processed_sql, processed_values)
+                        else:
+                            cur.execute(sql)
+                        
+                        rows = cur.fetchall()
+                        columns = list(rows[0].keys()) if len(rows) > 0 else []
+                        results.append({"data": rows, "columns": columns, "count": len(rows)})
+                
+                cur.close()
+                logger.info(f"Prepared query completed successfully with {len(results)} executions")
+                return results
+
+            elif self.database_type in ['mongodb', 'mongodb+srv']:
+                # MongoDB: Execute operation multiple times
+                results = []
+                for values in values_list:
+                    # For MongoDB, values would contain different operation parameters
+                    operation = sql.copy() if isinstance(sql, dict) else sql
+                    result = self._execute_mongo_query(operation, collection_name)
+                    results.append(result)
+                
+                logger.info(f"Prepared MongoDB operations completed with {len(results)} executions")
+                return results
+
+            else:
+                raise ValueError(f"Unsupported database type: {self.database_type}")
+
+        except Exception as e:
+            logger.error(f"query_prepared method failed: {e}")
+            raise
+
+    def execute_prepared(self, sql, values_list):
+        """
+        Execute prepared statement with multiple value sets for performance
+        Args:
+            sql: SQL statement to prepare (for SQL databases) or operation dict (for MongoDB)
+            values_list: list of value arrays for multiple executions [[val1, val2], [val3, val4], ...]
+        Returns:
+            list of dictionaries with status, message, data (empty), and total for each execution
+        """
+        if not values_list:
+            values_list = [[]]
+            
+        logger.debug(f"Prepared Execute: {sql}")
+        logger.debug(f"Values count: {len(values_list)}")
+
+        try:
+            if self.database_type in ['mysql', 'postgres', 'postgresql']:
+                # SQL databases with prepared statements
+                cur = self.conn.cursor()
+
+                if self.database_type in ['postgres', 'postgresql']:
+                    # PostgreSQL: Use server-side prepared statements
+                    prepared_name = f"prep_exec_{hash(sql) % 10000}"
+                    cur.execute(f"PREPARE {prepared_name} AS {sql}")
+                    
+                    results = []
+                    for values in values_list:
+                        try:
+                            if values:
+                                processed_sql, processed_values = Db.inject_current(f"EXECUTE {prepared_name}", values, self.placeholder)
+                                execute_sql = f"EXECUTE {prepared_name}({', '.join(['%s'] * len(processed_values))})"
+                                cur.execute(execute_sql, processed_values)
+                            else:
+                                cur.execute(f"EXECUTE {prepared_name}")
+                            
+                            affected_rows = cur.rowcount
+                            
+                            # Commit the transaction
+                            if hasattr(self.conn, 'commit'):
+                                self.conn.commit()
+                            
+                            success_msg = f"Prepared SQL statement succeeded. {affected_rows} rows affected."
+                            results.append({
+                                "status": 0,
+                                "message": success_msg,
+                                "data": [],
+                                "total": affected_rows
+                            })
+                            
+                        except Exception as e:
+                            if hasattr(self.conn, 'rollback'):
+                                try:
+                                    self.conn.rollback()
+                                except:
+                                    pass
+                            error_msg = f"Prepared execution failed: {e}"
+                            results.append({
+                                "status": -1,
+                                "message": error_msg,
+                                "data": [],
+                                "total": 0
+                            })
+                    
+                    # Clean up prepared statement
+                    try:
+                        cur.execute(f"DEALLOCATE {prepared_name}")
+                    except:
+                        pass  # Ignore cleanup errors
+                        
+                else:
+                    # MySQL: Execute multiple times (client-side preparation)
+                    results = []
+                    for values in values_list:
+                        try:
+                            if values:
+                                processed_sql, processed_values = Db.inject_current(sql, values, self.placeholder)
+                                cur.execute(processed_sql, processed_values)
+                            else:
+                                cur.execute(sql)
+                            
+                            affected_rows = cur.rowcount
+                            
+                            if hasattr(self.conn, 'commit'):
+                                self.conn.commit()
+                            
+                            success_msg = f"Prepared SQL statement succeeded. {affected_rows} rows affected."
+                            results.append({
+                                "status": 0,
+                                "message": success_msg,
+                                "data": [],
+                                "total": affected_rows
+                            })
+                            
+                        except Exception as e:
+                            if hasattr(self.conn, 'rollback'):
+                                try:
+                                    self.conn.rollback()
+                                except:
+                                    pass
+                            error_msg = f"Prepared execution failed: {e}"
+                            results.append({
+                                "status": -1,
+                                "message": error_msg,
+                                "data": [],
+                                "total": 0
+                            })
+                
+                cur.close()
+                logger.info(f"Prepared execute completed with {len(results)} executions")
+                return results
+
+            elif self.database_type in ['mongodb', 'mongodb+srv']:
+                # MongoDB: Execute operation multiple times
+                results = []
+                for values in values_list:
+                    # For MongoDB, each execution could have different parameters
+                    operation = sql.copy() if isinstance(sql, dict) else sql
+                    result = self._execute_mongo_operation(operation)
+                    results.append(result)
+                
+                logger.info(f"Prepared MongoDB operations completed with {len(results)} executions")
+                return results
+
+            else:
+                error_msg = f"Unsupported database type: {self.database_type}"
+                logger.error(error_msg)
+                return [{"status": -1, "message": error_msg, "data": [], "total": 0}]
+
+        except Exception as e:
+            error_msg = f"execute_prepared method failed: {e}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            return [{"status": -1, "message": error_msg, "data": [], "total": 0}]
+
+    def execute(self, sql, values=None):
+        """
+        Execute query with no return result set such as insert, update, delete, etc.
+        Args:
+            sql: SQL statement to execute (for SQL databases) or operation dict (for MongoDB)
+            values: values that need to be bound to query (optional, for SQL databases only)
+        Returns:
+            dictionary with status, message, data (empty), and total (affected rows)
+        """
+        if values is None:
+            values = []
+            
+        logger.debug(f"Execute SQL: {sql}")
+        logger.debug(f"Execute values: {values}")
+
+        try:
+            if self.database_type in ['mysql', 'postgres', 'postgresql']:
+                # Get appropriate cursor for the database type
+                if self.database_type in ['postgres', 'postgresql']:
+                    cur = self.conn.cursor()
+                else:  # mysql
+                    cur = self.conn.cursor()
+
+                # Handle CURRENT keywords in values
+                if values:
+                    sql, processed_values = Db.inject_current(sql, values, self.placeholder)
+                else:
+                    processed_values = values
+
+                # Escape SQL for database-specific requirements
+                sql = Db.escape_sql_for_database(sql, self.database_type, self.placeholder)
+
+                # Execute the statement
+                cur.execute(sql, processed_values)
+                
+                # Get affected row count
+                affected_rows = cur.rowcount
+                
+                # Commit the transaction (if autocommit is off)
+                if hasattr(self.conn, 'commit'):
+                    self.conn.commit()
+                
+                cur.close()
+                
+                success_msg = f"SQL statement succeeded. {affected_rows} rows is affected."
+                logger.info(success_msg)
+                
+                return {
+                    "status": 0,
+                    "message": success_msg,
+                    "data": [],
+                    "total": affected_rows
+                }
+                
+            elif self.database_type in ['mongodb', 'mongodb+srv']:
+                return self._execute_mongo_operation(sql)
+                
+            else:
+                error_msg = f"Unsupported database type: {self.database_type}"
+                logger.error(error_msg)
+                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+
+        except Exception as e:
+            # Rollback on SQL database errors
+            if self.database_type in ['mysql', 'postgres', 'postgresql'] and hasattr(self.conn, 'rollback'):
+                try:
+                    self.conn.rollback()
+                except:
+                    pass  # Ignore rollback errors
+                    
+            error_msg = f"Failed to execute statement: {e}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            return {"status": -1, "message": error_msg, "data": [], "total": 0}
+
+    def _execute_mongo_operation(self, operation):
+        """
+        Execute MongoDB operation with no return result set
+        Args:
+            operation: Dictionary containing MongoDB operation details with method and args
+        Returns:
+            Dictionary with status, message, data (empty), and total (affected count)
+        """
+        try:
+            if not isinstance(operation, dict):
+                error_msg = "MongoDB execute requires operation to be a dict"
+                logger.error(error_msg)
+                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+            
+            collection_name = operation.get("collection")
+            method_name = operation.get("method")
+            method_args = operation.get("args", [])
+            method_kwargs = operation.get("kwargs", {})
+            
+            if not collection_name:
+                error_msg = "MongoDB execute requires 'collection' in operation dict"
+                logger.error(error_msg)
+                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+                
+            if not method_name:
+                error_msg = "MongoDB execute requires 'method' in operation dict"
+                logger.error(error_msg)
+                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+            
+            collection = self.conn[self.database_name][collection_name]
+            
+            # Get the method from collection object
+            if not hasattr(collection, method_name):
+                error_msg = f"MongoDB collection does not have method: {method_name}"
+                logger.error(error_msg)
+                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+            
+            method = getattr(collection, method_name)
+            
+            # Execute the method with provided arguments
+            result = method(*method_args, **method_kwargs)
+            
+            # Try to get affected count from result
+            affected_count = 0
+            if hasattr(result, 'modified_count'):
+                affected_count = result.modified_count
+            elif hasattr(result, 'deleted_count'):
+                affected_count = result.deleted_count
+            elif hasattr(result, 'inserted_count'):
+                affected_count = result.inserted_count
+            elif hasattr(result, 'acknowledged'):
+                affected_count = 1 if result.acknowledged else 0
+            elif result is not None:
+                affected_count = 1
+                
+            success_msg = f"MongoDB {method_name.upper()} succeeded. {affected_count} rows is affected."
+            logger.info(success_msg)
+            
+            return {
+                "status": 0,
+                "message": success_msg,
+                "data": [],
+                "total": affected_count
+            }
+            
+        except Exception as e:
+            error_msg = f"MongoDB execute failed: {e}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            return {"status": -1, "message": error_msg, "data": [], "total": 0}
+
+    def update(self, table, data, where=None):
+        """
+        Update data in JSON format to table
+        Args:
+            table: target table name
+            data: JSON data with column-value pairs to update {"col1": "val1", "col2": "val2"}
+            where: JSON where condition (optional)
+        Returns:
+            dictionary with status, message, data (empty), and total (affected rows)
+        """
+        try:
+            # Handle empty update data
+            if not data:
+                logger.warning("Update called with empty data - no operation performed")
+                return {
+                    'status': 0,
+                    'message': 'No data to update',
+                    'data': [],
+                    'total': 0
+                }
+            
+            if self.database_type in ['mongodb', 'mongodb+srv']:
+                # MongoDB uses different approach - construct operation object
+                update_operation = self.mongo_update_constructor(table, data, where)
+                return self.execute(update_operation)
+            else:
+                # SQL databases - construct SQL and values, then use execute()
+                update_query, arr_values = self.update_constructor(table, data, where)
+                return self.execute(update_query, arr_values)
+        except Exception as e:
+            logger.error(f"update method failed: {e}")
+            raise
+
+    def update_constructor(self, table, data, where=None):
+        """
+        Construct SQL UPDATE statement from JSON data
+        Args:
+            table: target table name
+            data: JSON data with column-value pairs to update
+            where: JSON where condition (optional)
+        Returns:
+            tuple of (sql_query, values_array)
+        """
+        update_str = ''
+        list_val = []
+
+        try:
+            for k, v in data.items():
+                data_value = self._process_update_value(v)
+                
+                if data_value is None:
+                    update_str += ", " + k + " = NULL"
+                elif isinstance(data_value, str) and self.check_current_keyword(data_value):
+                    # Handle CURRENT keywords - they should not use placeholders
+                    update_str += ", " + k + " = " + self.unescape_current_keyword(data_value)
+                else:
+                    update_str += ", " + k + " = " + self.placeholder
+                    list_val.append(data_value)
+
+        except Exception as e:
+            logger.error(f"Failed to construct update statement: {e}")
+            raise
+
+        # Remove leading comma and space from update string
+        update_str = update_str[2:] if update_str else ''
+
+        # Parse where condition
+        where_str, where_values = Db.where_parser(where, self.placeholder)
+        
+        # Combine update values and where values
+        all_values = list_val + where_values
+
+        sql = f"UPDATE {table} SET {update_str}{where_str}"
+        return sql, all_values
+
+    def mongo_update_constructor(self, table, data, where=None):
+        """
+        Construct MongoDB update operation object
+        Args:
+            table: collection name
+            data: JSON data with column-value pairs to update
+            where: JSON where condition (optional)
+        Returns:
+            dictionary for MongoDB update operation
+        """
+        # Process update data - convert to MongoDB $set format
+        update_doc = {"$set": {}}
+        for k, v in data.items():
+            processed_value = self._process_update_value(v)
+            update_doc["$set"][k] = processed_value
+
+        return {
+            "collection": table,
+            "method": "update_many" if where else "update_many",  # Default to update_many
+            "args": [where or {}, update_doc]
+        }
+
+    def _process_update_value(self, value):
+        """
+        Process individual values for update operations
+        Handles different data types: dict, list, primitives, datetime objects, None
+        """
+        if value is None:
+            return None
+        elif isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, list):
+            if len(value) > 0:
+                if isinstance(value[0], dict):
+                    return json.dumps(value, ensure_ascii=False)
+                else:
+                    return '|'.join(str(item) for item in value)
+            else:
+                return '[]'
+        elif isinstance(value, datetime.date):
+            return str(value)
+        elif isinstance(value, datetime.datetime):
+            return datetime.datetime.strftime(value, '%Y-%m-%d %H:%M:%S.%f')
+        elif isinstance(value, str):
+            if self.check_current_keyword(value):
+                # CURRENT keyword should not use placeholder
+                return value
+            else:
+                return value
+        else:
+            return value
+
+    def delete(self, table, where=None):
+        """
+        Delete data from table based on where conditions
+        Args:
+            table: target table name
+            where: JSON where condition (optional, but recommended to avoid deleting all records)
+        Returns:
+            dictionary with status, message, data (empty), and total (affected rows)
+        """
+        try:
+            if self.database_type in ['mongodb', 'mongodb+srv']:
+                # MongoDB uses different approach - construct operation object
+                delete_operation = self.mongo_delete_constructor(table, where)
+                return self.execute(delete_operation)
+            else:
+                # SQL databases - construct SQL and values, then use execute()
+                delete_query, arr_values = self.delete_constructor(table, where)
+                return self.execute(delete_query, arr_values)
+        except Exception as e:
+            logger.error(f"delete method failed: {e}")
+            raise
+
+    def delete_constructor(self, table, where=None):
+        """
+        Construct SQL DELETE statement from JSON where condition
+        Args:
+            table: target table name
+            where: JSON where condition (optional)
+        Returns:
+            tuple of (sql_query, values_array)
+        """
+        try:
+            # Parse where condition
+            where_str, where_values = Db.where_parser(where, self.placeholder)
+            
+            # Construct DELETE statement
+            sql = f"DELETE FROM {table}{where_str}"
+            return sql, where_values
+            
+        except Exception as e:
+            logger.error(f"Failed to construct delete statement: {e}")
+            raise
+
+    def mongo_delete_constructor(self, table, where=None):
+        """
+        Construct MongoDB delete operation object
+        Args:
+            table: collection name
+            where: JSON where condition (optional)
+        Returns:
+            dictionary for MongoDB delete operation
+        """
+        return {
+            "collection": table,
+            "method": "delete_many",
+            "args": [where or {}]
+        }
