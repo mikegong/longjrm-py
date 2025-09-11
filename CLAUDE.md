@@ -16,13 +16,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Core Components
 
-- **`longjrm.database.db.Db`**: Core JRM class that wraps CRUD SQL statements via database APIs
-- **`longjrm.connection.pool.Pools`**: Multi-database connection pool management with thread-safe operations
+- **`longjrm.database.db.Db`**: Core JRM class providing complete CRUD operations via database APIs
+- **`longjrm.connection.pool.Pool`**: Multi-database connection pool management with thread-safe operations
 - **`longjrm.connection.dbconn.DatabaseConnection`**: Database connection abstraction layer
-- **`longjrm.config.config`**: Environment and database configuration loader (replaces old env.load_env)
+- **`longjrm.config.config`**: Environment and database configuration loader
 - **`longjrm.config.runtime`**: Runtime configuration management
-- **`longjrm.connection.driver_registry`**: Database driver registration and management
-- **`longjrm.connection.dsn_parts_helper`**: DSN parsing and connection string utilities
+- **`longjrm.connection.driver_registry`**: Database driver registration system
+- **`longjrm.connection.dsn_parts_helper`**: DSN parsing and connection utilities
 - **`longjrm.utils.file_loader`**: File loading utilities for configuration files
 
 ### Database Support
@@ -32,110 +32,234 @@ The library supports multiple database types through a unified interface:
 - **PostgreSQL** (via psycopg2)
 - **MongoDB** (via pymongo)
 
-**Extensible Architecture**: The library is architected to easily support additional databases that implement the Python DB-API 2.0 specification (PEP 249). This includes databases like SQLite, Oracle, SQL Server, and others. New database support requires minimal code changes - primarily updating driver mappings and connection logic.
+**Extensible Architecture**: Easily supports additional databases implementing Python DB-API 2.0 (PEP 249) including SQLite, Oracle, SQL Server, IBM DB2, Firebird, and others. Database driver mappings are defined in `longjrm/connection/driver_map.json`.
 
-Database driver mappings are defined in `longjrm/connection/driver_map.json`.
+## CRUD Operations API
 
-### Configuration Architecture
+### Complete CRUD Support
+The `Db` class provides comprehensive database operations with consistent JSON-based interface across all supported database types.
 
-- **Database configurations**: JSON configuration files for database connection settings
-- **Environment loading**: Uses python-dotenv when `USE_DOTENV=true` and `DOTENV_PATH` is set
-- **Connection pooling**: DBUtils-based pooling for SQL databases, native MongoDB connections
-- **Runtime configuration**: Dynamic configuration management via `longjrm.config.runtime`
+#### Database Client Setup
+```python
+from longjrm.config.config import JrmConfig
+from longjrm.config.runtime import configure
+from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.database.db import Db
+
+# Load configuration
+cfg = JrmConfig.from_files("config/jrm.config.json", "config/dbinfos.json")
+configure(cfg)
+
+# Create database client
+pool = Pool.from_config(cfg.require("database-key"), PoolBackend.DBUTILS)
+client = pool.get_client()
+db = Db(client)
+```
+
+#### 1. SELECT Operations
+```python
+# Basic select with columns
+result = db.select("users", ["id", "name", "email"])
+
+# Select with where conditions
+result = db.select("users", ["*"], where={"status": "active"})
+
+# Select with complex where and options
+result = db.select("users", 
+    columns=["name", "email"],
+    where={"age": {">": 25}, "status": "active"},
+    options={"limit": 10, "order_by": ["name ASC"]}
+)
+
+# Returns: {"data": [...], "columns": [...], "count": N}
+```
+
+#### 2. INSERT Operations
+```python
+# Single record insert
+record = {"name": "John Doe", "email": "john@example.com", "age": 30}
+result = db.insert("users", record)
+
+# Bulk insert
+records = [
+    {"name": "Jane Smith", "email": "jane@example.com", "age": 28},
+    {"name": "Bob Wilson", "email": "bob@example.com", "age": 35}
+]
+result = db.insert("users", records)
+
+# Insert with RETURNING (PostgreSQL)
+result = db.insert("users", record, return_columns=["id", "created_at"])
+
+# Insert with CURRENT keywords
+record = {"name": "Alice", "created_at": "`CURRENT_TIMESTAMP`"}
+result = db.insert("users", record)
+
+# Returns: {"status": 0, "message": "...", "data": [], "total": N}
+```
+
+#### 3. UPDATE Operations
+```python
+# Simple update
+data = {"status": "inactive", "updated_at": "`CURRENT_TIMESTAMP`"}
+where = {"id": 123}
+result = db.update("users", data, where)
+
+# Update with complex where conditions
+data = {"last_login": "`CURRENT_TIMESTAMP`"}
+where = {"status": "active", "age": {">": 18}}
+result = db.update("users", data, where)
+
+# Update with comprehensive where condition
+data = {"verified": True}
+where = {"email": {"operator": "LIKE", "value": "%@company.com", "placeholder": "Y"}}
+result = db.update("users", data, where)
+
+# Returns: {"status": 0, "message": "...", "data": [], "total": N}
+```
+
+#### 4. DELETE Operations
+```python
+# Delete with simple condition
+where = {"status": "inactive"}
+result = db.delete("users", where)
+
+# Delete with regular where condition
+where = {"age": {">": 65}, "last_login": {"<": "2023-01-01"}}
+result = db.delete("users", where)
+
+# Delete with comprehensive where condition
+where = {"email": {"operator": "LIKE", "value": "%@spam.com", "placeholder": "Y"}}
+result = db.delete("users", where)
+
+# Delete with LIKE operator (regular format)
+where = {"email": {"LIKE": "%@oldcompany.com"}}
+result = db.delete("users", where)
+
+# Returns: {"status": 0, "message": "...", "data": [], "total": N}
+```
+
+### Where Condition Formats
+
+The library supports three where condition formats:
+
+#### 1. Simple Condition
+```python
+{"column": "value"}
+# Equivalent to: column = 'value'
+```
+
+#### 2. Regular Condition
+```python
+{"column": {"operator": "value"}}
+# Examples:
+{"age": {">": 25, "<=": 65}}  # age > 25 AND age <= 65
+{"email": {"LIKE": "%@company.com"}}  # email LIKE '%@company.com'
+{"status": {"IN": ["active", "pending"]}}  # status IN ('active', 'pending')
+```
+
+#### 3. Comprehensive Condition
+```python
+{"column": {"operator": "=", "value": "data", "placeholder": "Y"}}
+# Provides explicit control over placeholder usage
+# placeholder: "Y" = use parameterized query, "N" = inline value
+```
+
+### MongoDB Support
+
+MongoDB operations use the same API with native MongoDB query syntax:
+
+```python
+# MongoDB where conditions use native operators
+where = {"age": {"$gt": 25}, "status": {"$in": ["active", "pending"]}}
+result = db.select("users", where=where)
+
+# MongoDB delete with regex
+where = {"email": {"$regex": "@company.com$"}}
+result = db.delete("users", where)
+```
+
+### Special Features
+
+#### CURRENT Keywords Support
+```python
+# SQL CURRENT keywords with backtick escaping
+data = {
+    "created_at": "`CURRENT_TIMESTAMP`",
+    "updated_date": "`CURRENT_DATE`"
+}
+# Automatically unescaped to: CURRENT_TIMESTAMP, CURRENT_DATE
+```
+
+#### Data Type Handling
+- **JSON Objects**: Automatically serialized to JSON strings
+- **Lists**: Joined with `|` separator or JSON serialized for complex objects
+- **Datetime Objects**: Formatted to ISO strings
+- **Null Values**: Handled as SQL NULL
 
 ## Development Commands
 
 ### Package Management
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Install package in development mode
-pip install -e .
-
-# Build package
-python setup.py sdist bdist_wheel
+pip install -r requirements.txt    # Install dependencies
+pip install -e .                   # Development mode install
+python setup.py sdist bdist_wheel  # Build package
 ```
 
 ### Testing
 ```bash
-# Run individual test files (no test runner configured)
-python longjrm/tests/pool_test.py
-python longjrm/tests/connection_test.py
+# Run comprehensive test suites
+python longjrm/tests/insert_test.py    # Test insert operations
+python longjrm/tests/update_test.py    # Test update operations  
+python longjrm/tests/delete_test.py    # Test delete operations
+python longjrm/tests/connection_test.py # Test connections
+python longjrm/tests/pool_test.py      # Test connection pooling
 ```
 
-## Key Design Patterns
+## Configuration
 
-### Database Client Architecture
-Each database operation requires a "client" object containing:
-- `conn`: Database connection/pool object
-- `database_type`: Type identifier (mysql, postgres, mongodb, etc.)  
-- `database_name`: Logical database name
-- `db_lib`: Library identifier (typically "dbutils")
-
-### JRM Query Pattern
-The `Db` class provides JSON-based CRUD operations:
-- JSON data format for column-value pairs
-- Dynamic SQL generation with proper escaping
-- Support for SQL CURRENT keywords with backtick escaping
-- Placeholder handling varies by database library (`%s` for dbutils, `?` for others)
-
-### Logging Strategy
-The library follows Python logging best practices:
-- Uses `logging.getLogger(__name__)` in modules
-- Root package (`longjrm/__init__.py`) includes `NullHandler()` for library silence
-- Applications control logging configuration and output
-
-### Environment Configuration
-Database connections are configured via:
-1. JSON configuration files (recommended for development)
-2. Environment variables via dotenv (when `USE_DOTENV=true`)
-3. Direct programmatic configuration
-
-## Testing Database Connections
-
-Test scripts expect database configurations in JSON format. Example configuration:
-
+### Database Configuration Format
 ```json
 {
-    "mysql-test": {
+    "mysql-dev": {
         "type": "mysql",
-        "host": "localhost", 
-        "user": "username",
+        "host": "localhost",
+        "user": "developer",
         "password": "password",
         "port": 3306,
-        "database": "test"
+        "database": "app_dev"
     },
-    "postgres-test": {
+    "postgres-prod": {
         "type": "postgres",
-        "host": "localhost",
-        "user": "username", 
-        "password": "password",
+        "host": "db.company.com",
+        "user": "app_user",
+        "password": "secure_password",
         "port": 5432,
-        "database": "test"
+        "database": "app_production"
     },
-    "mongodb-test": {
+    "mongodb-analytics": {
         "type": "mongodb",
-        "host": "localhost",
+        "host": "mongo.company.com",
         "port": 27017,
-        "database": "test"
+        "database": "analytics",
+        "auth_database": "admin",
+        "username": "analyst",
+        "password": "mongo_password"
     }
 }
 ```
 
-## Package Information
+### Environment Configuration
+```bash
+# Option 1: Environment variables (when USE_DOTENV=true)
+USE_DOTENV=true
+DOTENV_PATH=.env
 
-### Current Version
-- **Version**: 0.0.2
-- **Author**: Mike Gong at LONGINFO
-- **Package Name**: longjrm
-
-### Dependencies
-- PyMySQL ~= 1.1.0 (MySQL database support)
-- DBUtils ~= 3.0.3 (Connection pooling)
-- python-dotenv ~= 1.0.0 (Environment variable loading)
-- setuptools ~= 65.5.1 (Package building)
-- cryptography = 42.0.2 (Security and encryption support)
+# Option 2: JSON configuration files (recommended)
+python -c "
+from longjrm.config.config import JrmConfig
+cfg = JrmConfig.from_files('jrm.config.json', 'dbinfos.json')
+"
+```
 
 ## Module Structure
 
@@ -143,90 +267,102 @@ Test scripts expect database configurations in JSON format. Example configuratio
 longjrm/
 ├── __init__.py                 # Package initialization with NullHandler logging
 ├── config/                     # Configuration management
-│   ├── __init__.py
-│   ├── config.py              # Main configuration loader
+│   ├── config.py              # Main configuration loader  
 │   └── runtime.py             # Runtime configuration management
 ├── connection/                 # Database connection management
-│   ├── __init__.py
 │   ├── dbconn.py              # Database connection abstraction
 │   ├── driver_map.json        # Database driver mappings
 │   ├── driver_registry.py     # Driver registration system
 │   ├── dsn_parts_helper.py    # DSN parsing utilities
 │   └── pool.py                # Connection pooling implementation
 ├── database/                   # Database operations
-│   ├── __init__.py
-│   └── db.py                  # Core JRM database class
-├── tests/                      # Test suite
+│   └── db.py                  # Core JRM database class with CRUD operations
+├── tests/                      # Comprehensive test suite
+│   ├── insert_test.py         # Insert operation tests
+│   ├── update_test.py         # Update operation tests
+│   ├── delete_test.py         # Delete operation tests
 │   ├── connection_test.py     # Connection testing
 │   └── pool_test.py           # Pool testing
 └── utils/                      # Utility modules
-    ├── __init__.py
     └── file_loader.py         # File loading utilities
 ```
 
+## Database Client Architecture
+
+Each database operation requires a "client" object containing:
+- `conn`: Database connection/pool object
+- `database_type`: Type identifier (mysql, postgres, mongodb, etc.)  
+- `database_name`: Logical database name
+- `db_lib`: Library identifier (typically "dbutils")
+
+## Package Information
+
+- **Version**: 0.0.2
+- **Author**: Mike Gong at LONGINFO
+- **Package**: longjrm
+
+### Dependencies
+- PyMySQL ~= 1.1.0 (MySQL support)
+- DBUtils ~= 3.0.3 (Connection pooling)
+- python-dotenv ~= 1.0.0 (Environment variables)
+- setuptools ~= 65.5.1 (Package building)
+- cryptography = 42.0.2 (Security support)
+
 ## Development Guidelines
 
-### Code Style
+### Code Standards
 - Follow Python PEP 8 conventions
-- Use descriptive variable names
-- Maintain consistent import ordering
-- Add docstrings for public methods
-
-### Error Handling
-- Use appropriate exception types
-- Provide meaningful error messages
-- Log errors at appropriate levels
-- Handle connection failures gracefully
+- Use descriptive variable names and comprehensive docstrings
+- Maintain consistent import ordering and error handling
 
 ### Testing Strategy
-- Test individual modules with their respective test files
-- No unified test runner currently configured
-- Manual testing required for database connections
-- Use realistic database configurations for testing
+- **Abort-on-Failure**: All tests stop immediately on first failure
+- **Individual Test Isolation**: Each test wrapped in try-catch blocks
+- **Comprehensive Validation**: Status codes, row counts, and verification queries
+- **Multi-Backend Testing**: Tests run against DBUTILS and SQLAlchemy backends
+- **Cross-Database Compatibility**: Same test logic for SQL and MongoDB
+
+### Error Handling
+- Use appropriate exception types with meaningful error messages
+- Log errors at appropriate levels using `logging.getLogger(__name__)`
+- Handle connection failures gracefully with proper cleanup
 
 ### Logging Standards
-- Use `logging.getLogger(__name__)` in each module
 - Root package provides NullHandler for library silence
-- Applications should configure logging as needed
+- Applications control logging configuration and output
 - Follow Python logging best practices
 
 ## Common Development Tasks
 
 ### Adding New Database Support
-The library's architecture makes it straightforward to add support for any database that implements Python DB-API 2.0 (PEP 249):
+1. **Update Driver Mapping**: Add to `longjrm/connection/driver_map.json`
+2. **Implement Connection Logic**: Update `dbconn.py` with driver-specific logic
+3. **Handle SQL Variations**: Add database-specific patterns in `db.py`
+4. **Add Dependencies**: Include DB-API 2.0 compliant driver in `requirements.txt`
+5. **Create Tests**: Add test configuration and comprehensive test cases
+6. **Update Documentation**: Update README.md and CLAUDE.md
 
-1. **Update Driver Mapping**: Add new database type to `longjrm/connection/driver_map.json`
-2. **Implement Connection Logic**: Add driver-specific connection logic in `dbconn.py`
-3. **Handle SQL Variations**: Add any database-specific SQL generation patterns in `db.py`
-4. **Add Dependencies**: Include the appropriate DB-API 2.0 compliant driver in `requirements.txt`
-5. **Create Tests**: Create test configuration and test cases
-6. **Update Documentation**: Update README.md and CLAUDE.md with the new database support
+**Supported DB-API 2.0 Databases** (easily added):
+SQLite, Oracle, SQL Server, IBM DB2, Firebird, and others following DB-API 2.0 standard.
 
-**Supported DB-API 2.0 Databases** (can be easily added):
-- SQLite (via sqlite3)
-- Oracle (via cx_Oracle)
-- SQL Server (via pyodbc)
-- IBM DB2 (via ibm_db)
-- Firebird (via fdb)
-- And others that follow DB-API 2.0 standard
+## Performance Optimization
 
-### Extending Configuration Options
-1. Modify `longjrm/config/config.py` for new configuration parameters
-2. Update JSON configuration schema
-3. Add environment variable support if needed
-4. Test with various configuration scenarios
+- **Connection Pooling**: DBUtils-based pooling for SQL, native MongoDB connections
+- **Prepared Statements**: Available via `execute_prepared()` and `query_prepared()` methods
+- **Bulk Operations**: Optimized bulk insert support for large datasets
+- **Memory Management**: Efficient handling in long-running applications
 
-### Performance Optimization
-1. Focus on connection pooling efficiency
-2. Optimize SQL generation and execution
-3. Monitor memory usage in long-running applications
-4. Profile database operation performance
+## Security Best Practices
 
-## Important Notes for Development
+- **Parameterized Queries**: Default placeholder usage prevents SQL injection
+- **Credential Protection**: Never log or expose database credentials
+- **Connection Security**: Proper connection cleanup and thread safety
+- **Input Validation**: Comprehensive validation of JSON data and where conditions
 
-- **No ORM Dependencies**: Avoid adding traditional ORM dependencies
-- **JSON-First Approach**: All data exchange should use JSON format
+## Important Development Notes
+
+- **No ORM Dependencies**: Maintain lightweight architecture
+- **JSON-First Approach**: All data exchange uses JSON format
 - **Multi-Database Compatibility**: Ensure changes work across all supported databases
 - **Backward Compatibility**: Maintain API compatibility when making changes
-- **Security First**: Never log or expose sensitive database credentials
 - **Thread Safety**: Ensure connection pooling remains thread-safe
