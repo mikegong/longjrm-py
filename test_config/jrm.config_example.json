@@ -9,9 +9,9 @@
     "jrm_db_password": "",
     "jrm_db_name": "test",
     "jrm_db_options": "",
-    "jrm_db_timeout": 40,
-    "data_fetch_limit": 1000,
-    "min_conn_pool_size": 1,
-    "max_cached_conn": 5,
-    "pool_timeout": 60
+    "jrm_connect_timeout": 40,
+    "jrm_data_fetch_limit": 1000,
+    "jrm_min_conn_pool_size": 1,
+    "jrm_max_cached_conn": 5,
+    "jrm_pool_timeout": 60
 }

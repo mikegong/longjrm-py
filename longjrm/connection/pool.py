@@ -180,7 +180,7 @@ class Pool:
     def close_client(self, client: dict[str, Any]):
         try:
             client["conn"].close()
-            logger.info(f"Closed {self._b._cfg.type} connection to {self._b._cfg.database}")
+            logger.info(f"Released {self._b._cfg.type} connection to {self._b._cfg.database} back to the pool")
         except Exception as e:
             logger.warning(f"Failed to close connection {self._b._cfg.type} to '{self._b._cfg.database}'. Error: {e}")
 

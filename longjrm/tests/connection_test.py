@@ -12,9 +12,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-#db_key = "postgres-test"
+db_key = "postgres-test"
 #db_key = "mysql-test"
-db_key = "mongodb-test"
+#db_key = "mongodb-test"
 
 cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
 # inject the configuration into the runtime
@@ -45,3 +45,5 @@ try:
         print(result2)
 except Exception as e:
     print(e)
+finally:
+    db_connection.close()

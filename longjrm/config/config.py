@@ -157,12 +157,12 @@ class JrmConfig:
         return cls(
             _databases=parsed,
             default_db=cfg.get("default_db") or cfg.get("db_default"),
-            connect_timeout=_i("jrm_db_timeout", 40),
-            data_fetch_limit=_i("data_fetch_limit", 1000),
-            min_pool_size=_i("min_conn_pool_size", 1),
-            max_pool_size=_i("max_conn_pool_size", 10),
-            max_cached_conn=_i("max_cached_conn", 5),
-            pool_timeout=_i("pool_timeout", 60),
+            connect_timeout=_i("jrm_connect_timeout", 40),
+            data_fetch_limit=_i("jrm_data_fetch_limit", 1000),
+            min_pool_size=_i("jrm_min_conn_pool_size", 1),
+            max_pool_size=_i("jrm_max_conn_pool_size", 10),
+            max_cached_conn=_i("jrm_max_cached_conn", 5),
+            pool_timeout=_i("jrm_pool_timeout", 60),
         )
 
     @classmethod
@@ -176,8 +176,8 @@ class JrmConfig:
                 * {P}DB_DSN
                 * or parts: {P}DB_TYPE {P}DB_HOST {P}DB_PORT {P}DB_USER {P}DB_PASSWORD {P}DB_NAME
           - Selector / tuning:
-              {P}DB_DEFAULT, {P}JRM_DB_TIMEOUT, {P}DATA_FETCH_LIMIT, {P}MIN_CONN_POOL_SIZE,
-              {P}MAX_CONN_POOL_SIZE, {P}MAX_CACHED_CONN, {P}POOL_TIMEOUT
+              {P}DB_DEFAULT, {P}JRM_CONNECT_TIMEOUT, {P}JRM_DATA_FETCH_LIMIT, {P}JRM_MIN_CONN_POOL_SIZE,
+              {P}JRM_MAX_CONN_POOL_SIZE, {P}JRM_MAX_CACHED_CONN, {P}JRM_POOL_TIMEOUT
         Precedence: DATABASES_JSON > DBINFOS_PATH > single-DB vars.
         """
         get = os.getenv
@@ -245,10 +245,10 @@ class JrmConfig:
         return cls(
             _databases=parsed,
             default_db=get(prefix + "DB_DEFAULT") or (key if key in parsed else None),
-            connect_timeout=_i("JRM_DB_TIMEOUT", 40),
-            data_fetch_limit=_i("DATA_FETCH_LIMIT", 1000),
-            min_pool_size=_i("MIN_CONN_POOL_SIZE", 1),
-            max_pool_size=_i("MAX_CONN_POOL_SIZE", 10),
-            max_cached_conn=_i("MAX_CACHED_CONN", 5),
-            pool_timeout=_i("POOL_TIMEOUT", 60),
+            connect_timeout=_i("JRM_CONNECT_TIMEOUT", 40),
+            data_fetch_limit=_i("JRM_DATA_FETCH_LIMIT", 1000),
+            min_pool_size=_i("JRM_MIN_CONN_POOL_SIZE", 1),
+            max_pool_size=_i("JRM_MAX_CONN_POOL_SIZE", 10),
+            max_cached_conn=_i("JRM_MAX_CACHED_CONN", 5),
+            pool_timeout=_i("JRM_POOL_TIMEOUT", 60),
         )

@@ -24,7 +24,7 @@ configure(cfg)
 db_cfg = cfg.require(db_key)
 
 pools = {}
-pools[db_key] = Pool.from_config(db_cfg, PoolBackend.SQLALCHEMY)
+pools[db_key] = Pool.from_config(db_cfg, PoolBackend.DBUTILS)
 client = pools[db_key].get_client()
 
 db = Db(client)

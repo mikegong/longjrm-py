@@ -42,12 +42,12 @@ Set `JRM_SOURCE` to override default behavior:
 ```json
 {
   "default_db": "postgres-prod",
-  "jrm_db_timeout": 40,
-  "data_fetch_limit": 1000,
-  "min_conn_pool_size": 1,
-  "max_conn_pool_size": 10,
-  "max_cached_conn": 5,
-  "pool_timeout": 60,
+  "jrm_connect_timeout": 40,
+  "jrm_data_fetch_limit": 1000,
+  "jrm_min_conn_pool_size": 1,
+  "jrm_max_conn_pool_size": 10,
+  "jrm_max_cached_conn": 5,
+  "jrm_pool_timeout": 60,
   "databases": {
     "postgres-prod": {
       "type": "postgres",
@@ -131,7 +131,7 @@ export JRM_DB_NAME="app_database"
 export JRM_DB_OPTIONS='{"sslmode": "require"}'
 
 # Connection tuning
-export JRM_JRM_DB_TIMEOUT="30"
+export JRM_CONNECT_TIMEOUT="30"
 export JRM_DATA_FETCH_LIMIT="2000"
 export JRM_MIN_CONN_POOL_SIZE="2"
 export JRM_MAX_CONN_POOL_SIZE="20"
@@ -239,12 +239,12 @@ Configure connection pooling for optimal performance:
 
 ```json
 {
-  "jrm_db_timeout": 40,          // Connection timeout (seconds)
-  "data_fetch_limit": 1000,      // Max rows per query
-  "min_conn_pool_size": 1,       // Minimum pool connections
-  "max_conn_pool_size": 10,      // Maximum pool connections  
-  "max_cached_conn": 5,          // Max cached idle connections
-  "pool_timeout": 60             // Pool acquisition timeout (seconds)
+  "jrm_connect_timeout": 40,          // Connection timeout (seconds)
+  "jrm_data_fetch_limit": 1000,      // Max rows per query
+  "jrm_min_conn_pool_size": 1,       // Minimum pool connections
+  "jrm_max_conn_pool_size": 10,      // Maximum pool connections  
+  "jrm_max_cached_conn": 5,          // Max cached idle connections
+  "jrm_pool_timeout": 60             // Pool acquisition timeout (seconds)
 }
 ```
 
@@ -548,9 +548,9 @@ for name, db_config in config.databases().items():
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `default_db` | `str` | `None` | Default database key |
-| `connect_timeout` | `int` | `40` | Connection timeout (seconds) |
-| `data_fetch_limit` | `int` | `1000` | Maximum rows per query |
-| `min_pool_size` | `int` | `1` | Minimum connection pool size |
-| `max_pool_size` | `int` | `10` | Maximum connection pool size |
-| `max_cached_conn` | `int` | `5` | Maximum cached connections |
-| `pool_timeout` | `int` | `60` | Pool acquisition timeout (seconds) |
+| `jrm_connect_timeout` | `int` | `40` | Connection timeout (seconds) |
+| `jrm_data_fetch_limit` | `int` | `1000` | Maximum rows per query |
+| `jrm_min_pool_size` | `int` | `1` | Minimum connection pool size |
+| `jrm_max_pool_size` | `int` | `10` | Maximum connection pool size |
+| `jrm_max_cached_conn` | `int` | `5` | Maximum cached connections |
+| `jrm_pool_timeout` | `int` | `60` | Pool acquisition timeout (seconds) |

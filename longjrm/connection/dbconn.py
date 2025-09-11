@@ -118,6 +118,7 @@ class DatabaseConnection(object):
     def close(self):
         try:
             self.conn.close()
+            logger.info(f"Closed connection to {self.database_type} database '{self.database}'")
         except Exception as e:
             logger.info(f"Failed to close connection: {e}")
             pass
@@ -125,6 +126,7 @@ class DatabaseConnection(object):
     def close_client(self):
         try:
             self.client['conn'].close()
+            logger.info(f"Closed client connection to {self.database_type} database '{self.database}'")
         except Exception as e:
             logger.info(f"Failed to close client connection: {e}")
             pass
