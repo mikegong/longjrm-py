@@ -92,30 +92,36 @@ The library supports environment-based configuration when `USE_DOTENV=true` and 
 ### Basic Database Operations
 
 ```python
+from longjrm.config.config import JrmConfig
+from longjrm.config.runtime import configure
+from longjrm.connection.pool import Pool, PoolBackend
 from longjrm.database.db import Db
-from longjrm.connection.pool import Pools
 
-# Initialize connection pool
-pools = Pools()
-client = pools.get_client("mysql-test")
+# Load configuration
+cfg = JrmConfig.from_files("config/jrm.config.json", "config/dbinfos.json")
+configure(cfg)
 
-# Initialize JRM database handler
-db = Db()
+# Create connection pool
+pool = Pool.from_config(cfg.require("mysql-test"), PoolBackend.DBUTILS)
 
-# Insert operation with JSON data
-data = {"name": "John Doe", "email": "john@example.com"}
-result = db.insert(client, "users", data)
+# Use database with automatic connection management
+with pool.client() as client:
+    db = Db(client)
+    
+    # Insert operation with JSON data
+    data = {"name": "John Doe", "email": "john@example.com"}
+    result = db.insert("users", data)
 
-# Select operation
-conditions = {"email": "john@example.com"}
-users = db.select(client, "users", conditions)
+    # Select operation
+    conditions = {"email": "john@example.com"}
+    users = db.select("users", ["*"], where=conditions)
 
-# Update operation
-updates = {"name": "Jane Doe"}
-db.update(client, "users", updates, conditions)
+    # Update operation
+    updates = {"name": "Jane Doe"}
+    db.update("users", updates, conditions)
 
-# Delete operation
-db.delete(client, "users", conditions)
+    # Delete operation
+    db.delete("users", conditions)
 ```
 
 ### Database Client Architecture

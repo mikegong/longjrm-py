@@ -178,11 +178,9 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
     pools = {}
     # Use specified backend
     pools[db_key] = Pool.from_config(db_cfg, backend)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Setup test data
@@ -288,20 +286,15 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         
         print("\nSUCCESS: All SQL update tests completed successfully")
         
-    except Exception as e:
-        logger.error(f"SQL update test failed with error: {e}")
-        raise
-    finally:
         # Clean up test data
         try:
             cleanup_result = db.execute("DELETE FROM test_users WHERE email LIKE '%@updatetest.com'")
             print(f"SUCCESS: Cleaned up {cleanup_result['total']} test records")
         except Exception as e:
             print(f"WARNING:  Could not clean up test data: {e}")
-        
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
-        print(f"SUCCESS: {db_key} connection closed")
+    
+    pools[db_key].dispose()
+    print(f"SUCCESS: {db_key} connection closed")
 
 def test_mongodb_database_update(db_key):
     """Test update functionality for MongoDB"""
@@ -313,11 +306,9 @@ def test_mongodb_database_update(db_key):
     
     pools = {}
     pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Setup test data
@@ -406,10 +397,6 @@ def test_mongodb_database_update(db_key):
         
         print("\nSUCCESS: All MongoDB update tests completed successfully")
         
-    except Exception as e:
-        logger.error(f"MongoDB update test failed with error: {e}")
-        raise
-    finally:
         # Clean up test data
         try:
             collection = client.conn[db.database_name]["test_users"]
@@ -417,10 +404,9 @@ def test_mongodb_database_update(db_key):
             print(f"SUCCESS: Cleaned up {delete_result.deleted_count} test documents")
         except Exception as e:
             print(f"WARNING:  Could not clean up test data: {e}")
-        
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
-        print(f"SUCCESS: {db_key} connection closed")
+    
+    pools[db_key].dispose()
+    print(f"SUCCESS: {db_key} connection closed")
 
 def test_update_error_handling():
     """Test error handling for update operations"""
@@ -447,11 +433,9 @@ def test_update_error_handling():
     
     pools = {}
     pools[db_key] = Pool.from_config(cfg.require(db_key), PoolBackend.DBUTILS)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Testing error handling with {db.database_type} database")
         
         # Test 1: Empty update data
@@ -477,13 +461,8 @@ def test_update_error_handling():
             print(f"SUCCESS: Invalid table name caused expected exception: {type(e).__name__}")
         
         print("SUCCESS: Error handling tests completed")
-        
-    except Exception as e:
-        logger.error(f"Error handling test failed: {e}")
-        raise
-    finally:
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
+    
+    pools[db_key].dispose()
 
 if __name__ == "__main__":
     print("=== JRM Update Function Test Suite ===")

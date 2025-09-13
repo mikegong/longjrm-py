@@ -212,11 +212,9 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools = {}
     # Use specified backend
     pools[db_key] = Pool.from_config(db_cfg, backend)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Setup test data
@@ -422,21 +420,15 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             print(error_msg)
             raise Exception(f"Final verification failed for {db_key}: {e}")
         
-    except Exception as e:
-        logger.error(f"SQL database test failed with error: {e}")
-        print(f"ABORTING: {db_key} ({backend.value}) delete tests failed")
-        raise
-    finally:
         # Final cleanup
         try:
             db.execute("DELETE FROM test_users WHERE email LIKE '%@deletetest.com'")
             print("Final cleanup completed")
         except:
             pass
-        
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
-        print(f"Connection closed for {db_key}")
+    
+    pools[db_key].dispose()
+    print(f"Connection closed for {db_key}")
 
 def test_mongodb_database(db_key):
     """Test delete functionality for MongoDB"""
@@ -448,11 +440,9 @@ def test_mongodb_database(db_key):
     
     pools = {}
     pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Setup test data
@@ -604,11 +594,6 @@ def test_mongodb_database(db_key):
             print(error_msg)
             raise Exception(f"Final verification failed for {db_key}: {e}")
         
-    except Exception as e:
-        logger.error(f"MongoDB test failed with error: {e}")
-        print(f"ABORTING: {db_key} delete tests failed")
-        raise
-    finally:
         # Final cleanup
         try:
             collection = client["conn"][db.database_name]["test_users"]
@@ -616,10 +601,9 @@ def test_mongodb_database(db_key):
             print("Final cleanup completed")
         except:
             pass
-        
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
-        print(f"Connection closed for {db_key}")
+    
+    pools[db_key].dispose()
+    print(f"Connection closed for {db_key}")
 
 def test_error_handling():
     """Test error handling for delete operations"""
@@ -646,11 +630,9 @@ def test_error_handling():
     
     pools = {}
     pools[db_key] = Pool.from_config(cfg.require(db_key), PoolBackend.DBUTILS)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Test 1: Delete from non-existent table
@@ -691,14 +673,8 @@ def test_error_handling():
                 pass
         
         print("SUCCESS: Error handling tests completed")
-        
-    except Exception as e:
-        logger.error(f"Error handling test failed: {e}")
-        print(f"FAILED: Error handling tests: {e}")
-        raise Exception(f"Error handling tests failed: {e}")
-    finally:
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
+    
+    pools[db_key].dispose()
 
 if __name__ == "__main__":
     print("=== JRM Delete Function Test Suite ===")

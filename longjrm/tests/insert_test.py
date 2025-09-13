@@ -49,11 +49,9 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools = {}
     # Use specified backend
     pools[db_key] = Pool.from_config(db_cfg, backend)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Create test table if it doesn't exist (simple structure for testing)
@@ -200,14 +198,9 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             print(f"SUCCESS: Cleaned up {result['total']} test records")
         except Exception as e:
             print(f"WARNING: Could not clean up test data: {e}")
-        
-    except Exception as e:
-        logger.error(f"Test failed with error: {e}")
-        raise
-    finally:
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
-        print(f"SUCCESS: {db_key} connection closed")
+    
+    pools[db_key].dispose()
+    print(f"SUCCESS: {db_key} connection closed")
 
 def test_mongodb_database(db_key):
     """Test insert functionality for MongoDB"""
@@ -219,11 +212,9 @@ def test_mongodb_database(db_key):
     
     pools = {}
     pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Clean up any existing test data
@@ -308,13 +299,9 @@ def test_mongodb_database(db_key):
         except:
             print("SUCCESS: No test data to clean up")
         
-    except Exception as e:
-        logger.error(f"Test failed with error: {e}")
-        raise
-    finally:
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
-        print(f"SUCCESS: {db_key} connection closed")
+    
+    pools[db_key].dispose()
+    print(f"SUCCESS: {db_key} connection closed")
 
 def test_error_handling():
     """Test error handling for insert operations"""
@@ -341,11 +328,9 @@ def test_error_handling():
     
     pools = {}
     pools[db_key] = Pool.from_config(cfg.require(db_key), PoolBackend.DBUTILS)
-    client = pools[db_key].get_client()
     
-    db = Db(client)
-    
-    try:
+    with pools[db_key].client() as client:
+        db = Db(client)
         # Test inconsistent columns in bulk insert
         print("\n--- Test: Inconsistent Columns Error ---")
         inconsistent_records = [
@@ -361,12 +346,8 @@ def test_error_handling():
         except Exception as e:
             print(f"FAILED: Unexpected error type: {e}")
         
-    except Exception as e:
-        logger.error(f"Error handling test failed: {e}")
-        raise
-    finally:
-        pools[db_key].close_client(client)
-        pools[db_key].dispose()
+    
+    pools[db_key].dispose()
 
 if __name__ == "__main__":
     print("=== JRM Insert Function Test Suite ===")

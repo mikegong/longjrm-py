@@ -62,17 +62,13 @@ if db_config.type in ['mongodb', 'mongodb+srv']:
 else:
     pool = Pool.from_config(db_config, PoolBackend.SQLALCHEMY)
 
-# Get connection client
-client = pool.get_client()
-
-# Initialize database operations
-db = Db(client)
-
-# Perform operations
-result = db.select(table="users", columns=["id", "name", "email"])
-
-# Clean up
-pool.close_client(client)
+# Get connection client and perform operations
+with pool.client() as client:
+    # Initialize database operations
+    db = Db(client)
+    
+    # Perform operations
+    result = db.select(table="users", columns=["id", "name", "email"])
 pool.dispose()
 ```
 
@@ -911,15 +907,12 @@ except Exception as e:
 from longjrm.connection.dbconn import JrmConnectionError
 
 try:
-    client = pool.get_client()
-    db = Db(client)
-    result = db.select(table="users")
+    with pool.client() as client:
+        db = Db(client)
+        result = db.select(table="users")
 except JrmConnectionError as e:
     logger.error(f"Database connection failed: {e}")
     # Handle connection issues
-finally:
-    if 'client' in locals():
-        pool.close_client(client)
 ```
 
 ## Performance Considerations
@@ -949,20 +942,10 @@ result = db.select(
 ### Connection Pool Management
 
 ```python
-from contextlib import contextmanager
 
-@contextmanager
-def database_operation(pool):
-    """Context manager for database operations"""
-    client = pool.get_client()
-    try:
-        db = Db(client)
-        yield db
-    finally:
-        pool.close_client(client)
-
-# Efficient usage pattern
-with database_operation(pool) as db:
+# Efficient usage pattern using pool's built-in context manager
+with pool.client() as client:
+    db = Db(client)
     users = db.select(table="users", where={"active": True})
     orders = db.select(table="orders", where={"user_id": users["data"][0]["id"]})
     # Connection automatically returned to pool
@@ -989,7 +972,8 @@ pool = Pool.from_config(db_config, PoolBackend.SQLALCHEMY)
 @app.route('/api/users')
 def get_users():
     try:
-        with database_operation(pool) as db:
+        with pool.client() as client:
+            db = Db(client)
             result = db.select(
                 table="users",
                 columns=["id", "name", "email"],
@@ -1004,7 +988,8 @@ def get_users():
 def search_users():
     search_term = request.args.get('q', '')
     try:
-        with database_operation(pool) as db:
+        with pool.client() as client:
+            db = Db(client)
             result = db.select(
                 table="users",
                 where={
@@ -1022,7 +1007,8 @@ def search_users():
 ```python
 def process_user_data(pool):
     """Process user data across multiple queries"""
-    with database_operation(pool) as db:
+    with pool.client() as client:
+        db = Db(client)
         # Get all active users
         users = db.select(
             table="users",
@@ -1055,7 +1041,8 @@ class DataService:
         """Get user data from primary DB and analytics from analytics DB"""
         
         # Get user from primary database
-        with database_operation(self.primary_pool) as primary_db:
+        with self.primary_pool.client() as primary_client:
+            primary_db = Db(primary_client)
             user_result = primary_db.select(
                 table="users",
                 where={"id": user_id}
@@ -1067,7 +1054,8 @@ class DataService:
         user = user_result["data"][0]
         
         # Get analytics from analytics database
-        with database_operation(self.analytics_pool) as analytics_db:
+        with self.analytics_pool.client() as analytics_client:
+            analytics_db = Db(analytics_client)
             analytics_result = analytics_db.select(
                 table="user_analytics",
                 where={"user_id": user_id}
@@ -1145,63 +1133,56 @@ class TestDatabaseOperations(unittest.TestCase):
         self.pool = Pool.from_config(self.db_config, PoolBackend.SQLALCHEMY)
         
         # Create test table
-        client = self.pool.get_client()
-        db = Db(client)
-        db.query("""
-            CREATE TABLE test_users (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT UNIQUE,
-                status TEXT DEFAULT 'active'
-            )
-        """)
-        # Insert test data
-        db.query("INSERT INTO test_users (name, email) VALUES (?, ?)", ["John", "john@test.com"])
-        db.query("INSERT INTO test_users (name, email) VALUES (?, ?)", ["Jane", "jane@test.com"])
-        self.pool.close_client(client)
+        with self.pool.client() as client:
+            db = Db(client)
+            db.query("""
+                CREATE TABLE test_users (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT UNIQUE,
+                    status TEXT DEFAULT 'active'
+                )
+            """)
+            # Insert test data
+            db.query("INSERT INTO test_users (name, email) VALUES (?, ?)", ["John", "john@test.com"])
+            db.query("INSERT INTO test_users (name, email) VALUES (?, ?)", ["Jane", "jane@test.com"])
         
     def tearDown(self):
         self.pool.dispose()
     
     def test_select_all(self):
         """Test selecting all records"""
-        client = self.pool.get_client()
-        db = Db(client)
-        
-        result = db.select(table="test_users")
-        self.assertEqual(result["count"], 2)
-        self.assertIn("id", result["columns"])
-        self.assertIn("name", result["columns"])
-        
-        self.pool.close_client(client)
+        with self.pool.client() as client:
+            db = Db(client)
+            
+            result = db.select(table="test_users")
+            self.assertEqual(result["count"], 2)
+            self.assertIn("id", result["columns"])
+            self.assertIn("name", result["columns"])
     
     def test_select_with_where(self):
         """Test selecting with WHERE conditions"""
-        client = self.pool.get_client()
-        db = Db(client)
-        
-        result = db.select(
-            table="test_users",
-            where={"name": "John"}
-        )
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["data"][0]["name"], "John")
-        
-        self.pool.close_client(client)
+        with self.pool.client() as client:
+            db = Db(client)
+            
+            result = db.select(
+                table="test_users",
+                where={"name": "John"}
+            )
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["data"][0]["name"], "John")
     
     def test_select_with_columns(self):
         """Test selecting specific columns"""
-        client = self.pool.get_client()
-        db = Db(client)
-        
-        result = db.select(
-            table="test_users",
-            columns=["name", "email"]
-        )
-        self.assertEqual(len(result["columns"]), 2)
-        self.assertNotIn("id", result["columns"])
-        
-        self.pool.close_client(client)
+        with self.pool.client() as client:
+            db = Db(client)
+            
+            result = db.select(
+                table="test_users",
+                columns=["name", "email"]
+            )
+            self.assertEqual(len(result["columns"]), 2)
+            self.assertNotIn("id", result["columns"])
 ```
 
 ### Integration Testing
@@ -1220,19 +1201,17 @@ def test_cross_database_compatibility():
             db_config = DatabaseConfig.from_dict(config)
             pool = Pool.from_config(db_config, PoolBackend.SQLALCHEMY)
             
-            client = pool.get_client()
-            db = Db(client)
-            
-            # Test basic query
-            if db.database_type == "sqlite":
-                result = db.query("SELECT 1 as test")
-            else:
-                result = db.query("SELECT 1 as test")
-            
-            assert result["count"] == 1
-            assert result["data"][0]["test"] == 1
-            
-            pool.close_client(client)
+            with pool.client() as client:
+                db = Db(client)
+                
+                # Test basic query
+                if db.database_type == "sqlite":
+                    result = db.query("SELECT 1 as test")
+                else:
+                    result = db.query("SELECT 1 as test")
+                
+                assert result["count"] == 1
+                assert result["data"][0]["test"] == 1
             pool.dispose()
             
         except Exception as e:

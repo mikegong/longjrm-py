@@ -50,92 +50,123 @@ from longjrm.database.db import Db
 cfg = JrmConfig.from_files("config/jrm.config.json", "config/dbinfos.json")
 configure(cfg)
 
-# Create database client
+# Create database client with automatic connection management
 pool = Pool.from_config(cfg.require("database-key"), PoolBackend.DBUTILS)
-client = pool.get_client()
-db = Db(client)
+with pool.client() as client:
+    db = Db(client)
+    # Perform database operations here...
 ```
+
+#### Connection Management
+
+The Pool class provides automatic connection management through a context manager pattern:
+
+```python
+# Automatic connection management (Recommended)
+with pool.client() as client:
+    db = Db(client)
+    result = db.select("users", ["*"])
+    # Connection automatically returned to pool on exit
+```
+
+**Benefits:**
+- Automatic connection checkout and checkin
+- Proper cleanup even if exceptions occur
+- Prevents connection leaks
+- Thread-safe operation
 
 #### 1. SELECT Operations
 ```python
-# Basic select with columns
-result = db.select("users", ["id", "name", "email"])
+with pool.client() as client:
+    db = Db(client)
+    
+    # Basic select with columns
+    result = db.select("users", ["id", "name", "email"])
 
-# Select with where conditions
-result = db.select("users", ["*"], where={"status": "active"})
+    # Select with where conditions
+    result = db.select("users", ["*"], where={"status": "active"})
 
-# Select with complex where and options
-result = db.select("users", 
-    columns=["name", "email"],
-    where={"age": {">": 25}, "status": "active"},
-    options={"limit": 10, "order_by": ["name ASC"]}
-)
+    # Select with complex where and options
+    result = db.select("users", 
+        columns=["name", "email"],
+        where={"age": {">": 25}, "status": "active"},
+        options={"limit": 10, "order_by": ["name ASC"]}
+    )
 
-# Returns: {"data": [...], "columns": [...], "count": N}
+    # Returns: {"data": [...], "columns": [...], "count": N}
 ```
 
 #### 2. INSERT Operations
 ```python
-# Single record insert
-record = {"name": "John Doe", "email": "john@example.com", "age": 30}
-result = db.insert("users", record)
+with pool.client() as client:
+    db = Db(client)
+    
+    # Single record insert
+    record = {"name": "John Doe", "email": "john@example.com", "age": 30}
+    result = db.insert("users", record)
 
-# Bulk insert
-records = [
-    {"name": "Jane Smith", "email": "jane@example.com", "age": 28},
-    {"name": "Bob Wilson", "email": "bob@example.com", "age": 35}
-]
-result = db.insert("users", records)
+    # Bulk insert
+    records = [
+        {"name": "Jane Smith", "email": "jane@example.com", "age": 28},
+        {"name": "Bob Wilson", "email": "bob@example.com", "age": 35}
+    ]
+    result = db.insert("users", records)
 
-# Insert with RETURNING (PostgreSQL)
-result = db.insert("users", record, return_columns=["id", "created_at"])
+    # Insert with RETURNING (PostgreSQL)
+    result = db.insert("users", record, return_columns=["id", "created_at"])
 
-# Insert with CURRENT keywords
-record = {"name": "Alice", "created_at": "`CURRENT_TIMESTAMP`"}
-result = db.insert("users", record)
+    # Insert with CURRENT keywords
+    record = {"name": "Alice", "created_at": "`CURRENT_TIMESTAMP`"}
+    result = db.insert("users", record)
 
-# Returns: {"status": 0, "message": "...", "data": [], "total": N}
+    # Returns: {"status": 0, "message": "...", "data": [], "total": N}
 ```
 
 #### 3. UPDATE Operations
 ```python
-# Simple update
-data = {"status": "inactive", "updated_at": "`CURRENT_TIMESTAMP`"}
-where = {"id": 123}
-result = db.update("users", data, where)
+with pool.client() as client:
+    db = Db(client)
+    
+    # Simple update
+    data = {"status": "inactive", "updated_at": "`CURRENT_TIMESTAMP`"}
+    where = {"id": 123}
+    result = db.update("users", data, where)
 
-# Update with complex where conditions
-data = {"last_login": "`CURRENT_TIMESTAMP`"}
-where = {"status": "active", "age": {">": 18}}
-result = db.update("users", data, where)
+    # Update with complex where conditions
+    data = {"last_login": "`CURRENT_TIMESTAMP`"}
+    where = {"status": "active", "age": {">": 18}}
+    result = db.update("users", data, where)
 
-# Update with comprehensive where condition
-data = {"verified": True}
-where = {"email": {"operator": "LIKE", "value": "%@company.com", "placeholder": "Y"}}
-result = db.update("users", data, where)
+    # Update with comprehensive where condition
+    data = {"verified": True}
+    where = {"email": {"operator": "LIKE", "value": "%@company.com", "placeholder": "Y"}}
+    result = db.update("users", data, where)
 
-# Returns: {"status": 0, "message": "...", "data": [], "total": N}
+    # Returns: {"status": 0, "message": "...", "data": [], "total": N}
 ```
 
 #### 4. DELETE Operations
 ```python
-# Delete with simple condition
-where = {"status": "inactive"}
-result = db.delete("users", where)
+with pool.client() as client:
+    db = Db(client)
+    
+    # Delete with simple condition
+    where = {"status": "inactive"}
+    result = db.delete("users", where)
 
-# Delete with regular where condition
-where = {"age": {">": 65}, "last_login": {"<": "2023-01-01"}}
-result = db.delete("users", where)
+    # Delete with regular where condition
+    where = {"age": {">": 65}, "last_login": {"<": "2023-01-01"}}
+    result = db.delete("users", where)
 
-# Delete with comprehensive where condition
-where = {"email": {"operator": "LIKE", "value": "%@spam.com", "placeholder": "Y"}}
-result = db.delete("users", where)
+    # Delete with comprehensive where condition
+    where = {"email": {"operator": "LIKE", "value": "%@spam.com", "placeholder": "Y"}}
+    result = db.delete("users", where)
 
-# Delete with LIKE operator (regular format)
-where = {"email": {"LIKE": "%@oldcompany.com"}}
-result = db.delete("users", where)
+    # Delete with LIKE operator (regular format)
+    where = {"email": {"LIKE": "%@oldcompany.com"}}
+    result = db.delete("users", where)
 
-# Returns: {"status": 0, "message": "...", "data": [], "total": N}
+    # Returns: {"status": 0, "message": "...", "data": [], "total": N}
 ```
 
 ### Where Condition Formats
@@ -169,25 +200,32 @@ The library supports three where condition formats:
 MongoDB operations use the same API with native MongoDB query syntax:
 
 ```python
-# MongoDB where conditions use native operators
-where = {"age": {"$gt": 25}, "status": {"$in": ["active", "pending"]}}
-result = db.select("users", where=where)
+with pool.client() as client:
+    db = Db(client)
+    
+    # MongoDB where conditions use native operators
+    where = {"age": {"$gt": 25}, "status": {"$in": ["active", "pending"]}}
+    result = db.select("users", where=where)
 
-# MongoDB delete with regex
-where = {"email": {"$regex": "@company.com$"}}
-result = db.delete("users", where)
+    # MongoDB delete with regex
+    where = {"email": {"$regex": "@company.com$"}}
+    result = db.delete("users", where)
 ```
 
 ### Special Features
 
 #### CURRENT Keywords Support
 ```python
-# SQL CURRENT keywords with backtick escaping
-data = {
-    "created_at": "`CURRENT_TIMESTAMP`",
-    "updated_date": "`CURRENT_DATE`"
-}
-# Automatically unescaped to: CURRENT_TIMESTAMP, CURRENT_DATE
+with pool.client() as client:
+    db = Db(client)
+    
+    # SQL CURRENT keywords with backtick escaping
+    data = {
+        "created_at": "`CURRENT_TIMESTAMP`",
+        "updated_date": "`CURRENT_DATE`"
+    }
+    result = db.insert("users", data)
+    # Automatically unescaped to: CURRENT_TIMESTAMP, CURRENT_DATE
 ```
 
 #### Data Type Handling

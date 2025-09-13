@@ -1,7 +1,8 @@
 from __future__ import annotations
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Generator, Dict
 from enum import Enum
 import logging
+from contextlib import contextmanager
 from longjrm.config.config import DatabaseConfig
 from longjrm.config.runtime import get_config
 from longjrm.connection.dbconn import DatabaseConnection, JrmConnectionError, enforce_autocommit
@@ -174,15 +175,34 @@ class Pool:
 
         raise ValueError(f"Unknown backend: {pool_backend!r}")
 
-    def get_client(self):
+    def _get_client(self):
         return self._b.get_client()
 
-    def close_client(self, client: dict[str, Any]):
+    def _close_client(self, client: dict[str, Any]):
         try:
             client["conn"].close()
             logger.info(f"Released {self._b._cfg.type} connection to {self._b._cfg.database} back to the pool")
         except Exception as e:
             logger.warning(f"Failed to close connection {self._b._cfg.type} to '{self._b._cfg.database}'. Error: {e}")
 
+    @contextmanager
+    def client(self) -> Generator[Dict[str, Any], None, None]:
+        """
+        Context manager for automatic client checkout/checkin.
+        
+        Usage:
+            with pool.client() as client:
+                db = Db(client)
+                result = db.select("users", ["*"])
+                # client automatically returned to pool on exit
+        """
+        client = None
+        try:
+            client = self._get_client()
+            yield client
+        finally:
+            if client is not None:
+                self._close_client(client)
+                  
     def dispose(self) -> None:
         self._b.dispose()

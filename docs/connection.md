@@ -206,17 +206,14 @@ db_config = DatabaseConfig(
 # Create pool with SQLAlchemy backend
 pool = Pool.from_config(db_config, PoolBackend.SQLALCHEMY)
 
-# Get connection client
-client = pool.get_client()
-
-# Use the connection
-conn = client["conn"]
-cursor = conn.cursor()
-cursor.execute("SELECT 1")
-result = cursor.fetchone()
-
-# Return connection to pool
-pool.close_client(client)
+# Get connection client and use the connection
+with pool.client() as client:
+    # Use the connection
+    conn = client["conn"]
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1")
+    result = cursor.fetchone()
+    # Connection automatically returned to pool
 
 # Dispose pool when done
 pool.dispose()
@@ -286,29 +283,29 @@ pool = Pool.from_config(
 Pool clients provide a standardized interface across all database types:
 
 ```python
-client = pool.get_client()
-print(client)
-# Output:
-# {
-#     "conn": <database_connection_object>,
-#     "database_type": "postgres",
-#     "database_name": "mydb", 
-#     "db_lib": "psycopg2"
-# }
-
-# Access the raw connection
-raw_connection = client["conn"]
-
-# Database type for conditional logic
-if client["database_type"] == "mongodb":
-    # MongoDB-specific operations
-    collection = client["conn"][client["database_name"]]["users"]
-    result = collection.find_one({"_id": "user123"})
-else:
-    # SQL database operations
-    cursor = client["conn"].cursor()
-    cursor.execute("SELECT * FROM users WHERE id = %s", ("user123",))
-    result = cursor.fetchone()
+with pool.client() as client:
+    print(client)
+    # Output:
+    # {
+    #     "conn": <database_connection_object>,
+    #     "database_type": "postgres",
+    #     "database_name": "mydb", 
+    #     "db_lib": "psycopg2"
+    # }
+    
+    # Access the raw connection
+    raw_connection = client["conn"]
+    
+    # Database type for conditional logic
+    if client["database_type"] == "mongodb":
+        # MongoDB-specific operations
+        collection = client["conn"][client["database_name"]]["users"]
+        result = collection.find_one({"_id": "user123"})
+    else:
+        # SQL database operations
+        cursor = client["conn"].cursor()
+        cursor.execute("SELECT * FROM users WHERE id = %s", ("user123",))
+        result = cursor.fetchone()
 ```
 
 ## Production Patterns
@@ -341,14 +338,9 @@ class DatabaseManager:
             self.pools[db_name] = Pool.from_config(db_config, backend)
             
     def get_connection(self, db_name: str = None):
-        """Get connection client for database"""
+        """Get connection client context manager for database"""
         db_name = db_name or get_config().default_db
-        return self.pools[db_name].get_client()
-        
-    def close_connection(self, client, db_name: str = None):
-        """Return connection to pool"""
-        db_name = db_name or get_config().default_db
-        self.pools[db_name].close_client(client)
+        return self.pools[db_name].client()
         
     def shutdown(self):
         """Clean shutdown of all pools"""
@@ -360,13 +352,10 @@ db_manager = DatabaseManager()
 db_manager.initialize()
 
 # Usage in request handlers
-client = db_manager.get_connection("primary")
-try:
+with db_manager.get_connection("primary") as client:
     # Perform database operations
     conn = client["conn"]
     # ... database work
-finally:
-    db_manager.close_connection(client, "primary")
 
 # Application shutdown
 db_manager.shutdown()
@@ -377,17 +366,8 @@ db_manager.shutdown()
 ```python
 from contextlib import contextmanager
 
-@contextmanager
-def database_connection(pool):
-    """Context manager for automatic connection cleanup"""
-    client = pool.get_client()
-    try:
-        yield client
-    finally:
-        pool.close_client(client)
-
-# Usage
-with database_connection(pool) as client:
+# Usage with pool's built-in context manager
+with pool.client() as client:
     conn = client["conn"]
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users")
@@ -403,11 +383,14 @@ with database_connection(pool) as client:
 from longjrm.connection.dbconn import JrmConnectionError
 import time
 
+@contextmanager
 def robust_connection(pool, max_retries=3, delay=1):
     """Get connection with retry logic"""
     for attempt in range(max_retries):
         try:
-            return pool.get_client()
+            with pool.client() as client:
+                yield client
+                return
         except JrmConnectionError as e:
             if attempt == max_retries - 1:
                 raise
@@ -415,8 +398,9 @@ def robust_connection(pool, max_retries=3, delay=1):
     
 # Usage
 try:
-    client = robust_connection(pool)
-    # ... use connection
+    with robust_connection(pool) as client:
+        # ... use connection
+        pass
 except JrmConnectionError:
     # Handle final failure
     pass
@@ -431,20 +415,20 @@ class FailoverDatabaseManager:
         self.replicas = replica_pools
         
     def get_read_connection(self):
-        """Get connection preferring replicas for read operations"""
+        """Get connection context manager preferring replicas for read operations"""
         # Try replicas first for read load balancing
         for replica in self.replicas:
             try:
-                return replica.get_client()
+                return replica.client()
             except JrmConnectionError:
                 continue
         
         # Fall back to primary
-        return self.primary.get_client()
+        return self.primary.client()
     
     def get_write_connection(self):
-        """Get connection to primary for write operations"""
-        return self.primary.get_client()
+        """Get connection context manager to primary for write operations"""
+        return self.primary.client()
 ```
 
 ## Database-Specific Considerations
@@ -524,7 +508,7 @@ db_config = DatabaseConfig(
 # MongoDB connection usage
 pool = Pool.from_config(db_config, PoolBackend.MONGODB)
 
-with database_connection(pool) as client:
+with pool.client() as client:
     mongo_client = client["conn"]
     database = mongo_client[client["database_name"]]
     
@@ -553,8 +537,9 @@ with database_connection(pool) as client:
 from longjrm.connection.dbconn import JrmConnectionError
 
 try:
-    client = pool.get_client()
-    # ... database operations
+    with pool.client() as client:
+        # ... database operations
+        pass
 except JrmConnectionError as e:
     logger.error(f"Database connection failed: {e}")
     # Handle connection failure
@@ -562,9 +547,6 @@ except JrmConnectionError as e:
     # - Use fallback data source
     # - Return cached data
     # - Fail gracefully
-finally:
-    if 'client' in locals():
-        pool.close_client(client)
 ```
 
 ## Testing
@@ -589,17 +571,15 @@ class TestDatabaseConnection(unittest.TestCase):
         
     def test_connection_pool(self):
         """Test basic pool functionality"""
-        client = self.pool.get_client()
-        self.assertIsNotNone(client["conn"])
-        self.assertEqual(client["database_type"], "sqlite")
-        
-        # Test connection works
-        cursor = client["conn"].cursor()
-        cursor.execute("SELECT 1")
-        result = cursor.fetchone()
-        self.assertEqual(result[0], 1)
-        
-        self.pool.close_client(client)
+        with self.pool.client() as client:
+            self.assertIsNotNone(client["conn"])
+            self.assertEqual(client["database_type"], "sqlite")
+            
+            # Test connection works
+            cursor = client["conn"].cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            self.assertEqual(result[0], 1)
 ```
 
 ### Integration Testing
@@ -626,22 +606,20 @@ def test_real_database_connection():
         pool = Pool.from_config(db_config, backend)
         
         try:
-            client = pool.get_client()
-            
-            if db_config.type in ['mongodb', 'mongodb+srv']:
-                # Test MongoDB connection
-                mongo_client = client["conn"]
-                result = mongo_client.admin.command('ping')
-                assert result['ok'] == 1
-            else:
-                # Test SQL connection
-                cursor = client["conn"].cursor()
-                cursor.execute("SELECT 1")
-                result = cursor.fetchone()
-                assert result[0] == 1
+            with pool.client() as client:
+                if db_config.type in ['mongodb', 'mongodb+srv']:
+                    # Test MongoDB connection
+                    mongo_client = client["conn"]
+                    result = mongo_client.admin.command('ping')
+                    assert result['ok'] == 1
+                else:
+                    # Test SQL connection
+                    cursor = client["conn"].cursor()
+                    cursor.execute("SELECT 1")
+                    result = cursor.fetchone()
+                    assert result[0] == 1
                 
         finally:
-            pool.close_client(client)
             pool.dispose()
 ```
 
@@ -716,8 +694,7 @@ class Pool:
         dbutils_opts: Optional[Mapping[str, Any]] = None,
     ) -> "Pool"
     
-    def get_client() -> dict[str, Any]
-    def close_client(self, client: dict[str, Any]) -> None
+    def client() -> Iterator[dict[str, Any]]  # Context manager
     def dispose() -> None
     
     @property

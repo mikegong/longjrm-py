@@ -25,26 +25,25 @@ db_cfg = cfg.require(db_key)
 
 pools = {}
 pools[db_key] = Pool.from_config(db_cfg, PoolBackend.DBUTILS)
-client = pools[db_key].get_client()
 
-db = Db(client)
+with pools[db_key].client() as client:
+    db = Db(client)
+    
+    # result = db.query("SELECT VERSION()")
+    
+    if db.database_type == 'mongodb':
+        result = db.select(table='Listing', where={'guestCount': 4, 'roomCount': 2})
+        print(result)
+    else:
+        result1 = db.select(table='sample', columns=['*'], where={'c1': 'a'})
+        result2 = db.select(table='sample', columns=['*'], where={'c2': 3})
+        print(result1)
+        print(result2)
+    
+    # cursor = conn.cursor()
+    # cursor.execute("SELECT VERSION()")
+    # version = cursor.fetchone()
+    # print("Database version:", version)
+    # Make sure to close the connection
 
-# result = db.query("SELECT VERSION()")
-
-if db.database_type == 'mongodb':
-    result = db.select(table='Listing', where={'guestCount': 4, 'roomCount': 2})
-    print(result)
-else:
-    result1 = db.select(table='sample', columns=['*'], where={'c1': 'a'})
-    result2 = db.select(table='sample', columns=['*'], where={'c2': 3})
-    print(result1)
-    print(result2)
-
-# cursor = conn.cursor()
-# cursor.execute("SELECT VERSION()")
-# version = cursor.fetchone()
-# print("Database version:", version)
-# Make sure to close the connection
-
-pools[db_key].close_client(client)
 pools[db_key].dispose()
