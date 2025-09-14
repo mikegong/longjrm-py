@@ -10,9 +10,9 @@ The core philosophy is to eliminate data models inside applications and work dir
 
 ## Key Features
 
-- **Multi-Database Support**: Unified interface for MySQL, PostgreSQL, and MongoDB
+- **Multi-Database Support**: Unified interface for MySQL, PostgreSQL, MongoDB, and more databases that support DB-API 2.0
 - **JSON-Based Operations**: Direct JSON input/output for database operations
-- **Connection Pooling**: Efficient connection management with DBUtils-based pooling
+- **Connection Pooling**: Efficient connection management with DBUtils-based pooling and SQLAlchemy pooling
 - **Configuration Management**: Flexible configuration via JSON files or environment variables
 - **Lightweight Design**: Minimal overhead compared to traditional ORMs
 - **Database Agnostic**: Consistent API across different database types
@@ -57,6 +57,44 @@ python setup.py sdist bdist_wheel
 
 ## Configuration
 
+### Runtime Configuration (12-Factor App Compliant)
+
+The library follows **12-Factor App** principles for configuration management, particularly **Factor III: Config**. Configuration can be provided through:
+
+1. **Environment Variables** (recommended for production)
+2. **Configuration Files** (suitable for development)
+3. **Programmatic Configuration** (for testing and embedded applications)
+
+#### Environment-Based Configuration
+
+For production deployments following 12-Factor principles, configure via environment variables:
+
+```bash
+# Single database configuration
+export JRM_DB_TYPE=mysql
+export JRM_DB_HOST=localhost
+export JRM_DB_USER=username
+export JRM_DB_PASSWORD=password
+export JRM_DB_PORT=3306
+export JRM_DB_NAME=production_db
+export JRM_DB_KEY=mysql-prod
+
+# Or use a complete JSON configuration
+export JRM_DATABASES_JSON='{"mysql-prod": {"type": "mysql", "host": "db.example.com", "user": "app", "password": "secret", "port": 3306, "database": "prod"}}'
+
+# Control configuration source precedence
+export JRM_SOURCE=env  # Force environment-only (ignore files)
+export JRM_SOURCE=files  # Force file-only (ignore environment)
+export JRM_SOURCE=auto  # Default: smart precedence (env > files > defaults)
+```
+
+#### Configuration Precedence (JRM_SOURCE=auto)
+
+1. **Environment paths**: If `JRM_CONFIG_PATH` or `JRM_DBINFOS_PATH` is set → load from files
+2. **Environment variables**: If any `JRM_*` database variables exist → load from environment
+3. **Default files**: If `./config/{jrm.config.json, dbinfos.json}` exists → load those
+4. **Fallback**: Attempt environment loading (raises error if nothing configured)
+
 ### Database Configuration Files
 
 Create database configuration files in JSON format:
@@ -88,22 +126,49 @@ Create database configuration files in JSON format:
 }
 ```
 
-### Environment Configuration
-
-The library supports environment-based configuration when `USE_DOTENV=true` and `DOTENV_PATH` is set.
-
 ## Usage
 
-### Basic Database Operations
+### Runtime Configuration Usage
+
+#### Automatic Configuration (Recommended)
 
 ```python
-from longjrm.config.config import JrmConfig
-from longjrm.config.runtime import configure
+from longjrm.config.runtime import get_config, require_db, using_db
 from longjrm.connection.pool import Pool, PoolBackend
 from longjrm.database.db import Db
 
-# Load configuration
+# Automatically loads config based on environment or files
+cfg = get_config()
+db_config = require_db("mysql-prod")  # or require_db() for default
+
+# Create connection pool
+pool = Pool.from_config(db_config, PoolBackend.DBUTILS)
+
+# Use with context manager for automatic DB selection
+with using_db("mysql-prod"):
+    with pool.client() as client:
+        db = Db(client)
+        result = db.select("users", ["*"])
+```
+
+#### Manual Configuration
+
+```python
+from longjrm.config.config import JrmConfig
+from longjrm.config.runtime import configure, using_config
+from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.database.db import Db
+
+# Load configuration from specific files
 cfg = JrmConfig.from_files("config/jrm.config.json", "config/dbinfos.json")
+
+# Set as current configuration
+with using_config(cfg):
+    db_config = require_db("mysql-test")
+    pool = Pool.from_config(db_config, PoolBackend.DBUTILS)
+    # ... database operations
+
+# Or configure globally for the current context
 configure(cfg)
 
 # Create connection pool
@@ -150,10 +215,10 @@ finally:
 ### Database Client Architecture
 
 Each database operation requires a "client" object containing:
-- `conn`: Database connection/pool object
+- `conn`: Database connection object
 - `database_type`: Type identifier (mysql, postgres, mongodb, etc.)
 - `database_name`: Logical database name
-- `db_lib`: Library identifier (typically "dbutils")
+- `db_lib`: Python database driver such as psycopg2, pymysql, pymongo
 
 ## Testing
 
@@ -212,6 +277,8 @@ python longjrm/tests/insert_test.py
 
 ### Test Coverage
 
+The test suite provides comprehensive coverage of all database operations:
+
 - **`connection_test.py`**: Basic database connectivity testing
 - **`pool_test.py`**: Connection pooling and select operations testing  
 - **`insert_test.py`**: Comprehensive insert functionality testing
@@ -221,6 +288,27 @@ python longjrm/tests/insert_test.py
   - Error handling and edge cases
   - CURRENT keyword support
   - PostgreSQL RETURNING clause support
+- **`select_test.py`**: SELECT query operations testing
+  - Basic SELECT with WHERE conditions
+  - Column selection and filtering
+  - Complex query patterns
+- **`update_test.py`**: UPDATE operations testing
+  - Single and batch record updates
+  - Conditional updates with WHERE clauses
+  - Cross-database compatibility
+- **`delete_test.py`**: DELETE operations testing
+  - Conditional deletions
+  - Bulk deletion operations
+  - Safety checks and constraints
+- **`merge_test.py`**: MERGE/UPSERT operations testing
+  - Insert-or-update logic
+  - Conflict resolution strategies
+  - Database-specific merge implementations
+- **`placeholder_test.py`**: SQL placeholder handling testing
+  - Positional placeholder support (`%s`, `?`)
+  - Named placeholder support (`:name`, `%(name)s`, `$name`)
+  - Automatic placeholder detection and conversion
+  - Cross-database placeholder compatibility
 
 ## Design Patterns
 
