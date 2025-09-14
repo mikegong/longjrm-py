@@ -175,10 +175,10 @@ class Pool:
 
         raise ValueError(f"Unknown backend: {pool_backend!r}")
 
-    def _get_client(self):
+    def get_client(self):
         return self._b.get_client()
 
-    def _close_client(self, client: dict[str, Any]):
+    def close_client(self, client: dict[str, Any]):
         try:
             client["conn"].close()
             logger.info(f"Released {self._b._cfg.type} connection to {self._b._cfg.database} back to the pool")
@@ -198,11 +198,11 @@ class Pool:
         """
         client = None
         try:
-            client = self._get_client()
+            client = self.get_client()
             yield client
         finally:
             if client is not None:
-                self._close_client(client)
+                self.close_client(client)
                   
     def dispose(self) -> None:
         self._b.dispose()

@@ -36,13 +36,11 @@ db = Db(client)
 
 1. **Query Operations** - Raw SQL execution with parameter binding
 2. **Select Operations** - JSON-based SELECT queries with comprehensive WHERE conditions
-3. **GraphQL-Style Querying** - Single function comprehensive table queries with complex condition support
-
-### 🚧 Work in Progress
-
-1. **Insert Operations** - Bulk and single record insertion
-2. **Update Operations** - Conditional record updates  
-3. **Delete Operations** - Conditional record deletion
+3. **Insert Operations** - Bulk and single record insertion with RETURNING support
+4. **Update Operations** - Conditional record updates with flexible WHERE conditions
+5. **Delete Operations** - Conditional record deletion with comprehensive filtering
+6. **Merge Operations** - UPSERT operations with key-based conflict resolution
+7. **GraphQL-Style Querying** - Single function comprehensive table queries with complex condition support
 
 ## Database Client Integration
 
@@ -1068,13 +1066,14 @@ class DataService:
         return user
 ```
 
-## Development Roadmap
+## CRUD Operations
 
-### Upcoming Features (Work in Progress)
+### Insert Operations
 
-#### Insert Operations
+Insert single records or multiple records with support for PostgreSQL RETURNING clause:
+
 ```python
-# Planned insert functionality
+# Single record insert
 result = db.insert(
     table="users",
     data={
@@ -1085,31 +1084,80 @@ result = db.insert(
 )
 
 # Bulk insert support
-result = db.insert_many(
+records = [
+    {"name": "User 1", "email": "user1@example.com"},
+    {"name": "User 2", "email": "user2@example.com"}
+]
+result = db.insert(table="users", data=records)
+
+# PostgreSQL RETURNING clause
+result = db.insert(
     table="users",
-    data=[
-        {"name": "User 1", "email": "user1@example.com"},
-        {"name": "User 2", "email": "user2@example.com"}
-    ]
+    data={"name": "Alice", "email": "alice@example.com"},
+    return_columns=["id", "created_at"]
 )
 ```
 
-#### Update Operations
+### Update Operations
+
+Update records with flexible WHERE conditions:
+
 ```python
-# Planned update functionality
+# Basic update
 result = db.update(
     table="users",
     data={"status": "inactive", "modified_at": "`CURRENT TIMESTAMP`"},
     where={"last_login": {"<": "2023-01-01"}}
 )
+
+# Complex conditions
+result = db.update(
+    table="products",
+    data={"price": 99.99, "updated_at": "`CURRENT TIMESTAMP`"},
+    where={
+        "category": "electronics",
+        "stock": {">": 0},
+        "created_at": {">=": "2024-01-01"}
+    }
+)
 ```
 
-#### Delete Operations
+### Delete Operations
+
+Delete records with comprehensive filtering:
+
 ```python
-# Planned delete functionality
+# Basic delete
 result = db.delete(
     table="users",
     where={"status": "banned", "created_at": {"<": "2022-01-01"}}
+)
+
+# Complex delete conditions  
+result = db.delete(
+    table="logs",
+    where={
+        "level": "DEBUG",
+        "timestamp": {"<": "`CURRENT_DATE - INTERVAL 30 DAY`"},
+        "processed": True
+    }
+)
+```
+
+### Merge Operations
+
+UPSERT operations with key-based conflict resolution:
+
+```python
+# Merge operation (INSERT or UPDATE based on key match)
+result = db.merge(
+    table="user_profiles",
+    data={
+        "user_id": 123,
+        "profile_data": {"theme": "dark", "language": "en"},
+        "updated_at": "`CURRENT TIMESTAMP`"
+    },
+    key_columns=["user_id"]
 )
 ```
 
@@ -1324,11 +1372,17 @@ class Db:
     def select(self, table: str, columns: list = None, where: dict = None, options: dict = None) -> dict
     """Execute SELECT query with JSON-based conditions"""
     
-    # Future methods (work in progress):
-    # def insert(self, table: str, data: dict) -> dict
-    # def insert_many(self, table: str, data: list) -> dict  
-    # def update(self, table: str, data: dict, where: dict) -> dict
-    # def delete(self, table: str, where: dict) -> dict
+    def insert(self, table: str, data: Union[dict, list], return_columns: list = None) -> dict
+    """Insert single record or multiple records"""
+    
+    def update(self, table: str, data: dict, where: dict = None) -> dict
+    """Update records with WHERE conditions"""
+    
+    def delete(self, table: str, where: dict = None) -> dict
+    """Delete records with WHERE conditions"""
+    
+    def merge(self, table: str, data: dict, key_columns: list) -> dict
+    """UPSERT operation with key-based conflict resolution"""
 ```
 
 ### Response Format

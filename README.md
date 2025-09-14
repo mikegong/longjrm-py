@@ -16,13 +16,18 @@ The core philosophy is to eliminate data models inside applications and work dir
 - **Configuration Management**: Flexible configuration via JSON files or environment variables
 - **Lightweight Design**: Minimal overhead compared to traditional ORMs
 - **Database Agnostic**: Consistent API across different database types
+- **Automatic Connection Management**: Context manager pattern for safe resource handling
+
+## Advanced Features
+
+- **Placeholder Support**: Supports both positional (`%s`, `?`) and named placeholders (`:name`, `%(name)s`, `$name`) with automatic detection and conversion
 
 ## Architecture
 
 ### Core Components
 
 - **`longjrm.database.db.Db`**: Core JRM class that wraps CRUD SQL statements via database APIs
-- **`longjrm.connection.pool.Pools`**: Multi-database connection pool management
+- **`longjrm.connection.pool.Pool`**: Multi-database connection pool management
 - **`longjrm.connection.dbconn.DatabaseConnection`**: Database connection abstraction layer
 - **`longjrm.config.config`**: Environment and database configuration loader
 - **`longjrm.utils`**: Library-standard utilities including logging
@@ -104,7 +109,7 @@ configure(cfg)
 # Create connection pool
 pool = Pool.from_config(cfg.require("mysql-test"), PoolBackend.DBUTILS)
 
-# Use database with automatic connection management
+# Use database with automatic connection management (recommended for single operations)
 with pool.client() as client:
     db = Db(client)
     
@@ -122,6 +127,24 @@ with pool.client() as client:
 
     # Delete operation
     db.delete("users", conditions)
+
+# Manual connection management (for transaction control)
+client = pool.get_client()
+try:
+    db = Db(client)
+    
+    # Begin transaction
+    db.execute("BEGIN")
+    
+    # Multiple operations in same transaction
+    db.insert("orders", {"user_id": 1, "amount": 100.00})
+    db.update("users", {"last_order": "`CURRENT_TIMESTAMP`"}, {"id": 1})
+    
+    # Commit transaction
+    db.execute("COMMIT")
+    
+finally:
+    pool.close_client(client)
 ```
 
 ### Database Client Architecture
@@ -216,11 +239,14 @@ The library follows Python logging best practices:
 
 ## Dependencies
 
-- PyMySQL ~= 1.1.0
-- DBUtils ~= 3.0.3
-- python-dotenv ~= 1.0.0
-- setuptools ~= 65.5.1
-- cryptography = 42.0.2
+### Database Drivers (installed based on your database needs)
+- PyMySQL ~= 1.1.0 (MySQL support)
+- psycopg2-binary ~= 2.9.0 (PostgreSQL support)
+- pymongo ~= 4.6.0 (MongoDB support)
+
+### Connection Pooling
+- SQLAlchemy ~= 2.0.0 (Advanced connection pooling backend)
+- DBUtils ~= 3.0.3 (Lightweight connection pooling backend)
 
 ## License
 

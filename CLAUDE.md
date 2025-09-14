@@ -59,21 +59,37 @@ with pool.client() as client:
 
 #### Connection Management
 
-The Pool class provides automatic connection management through a context manager pattern:
+The Pool class provides two connection management patterns:
 
 ```python
-# Automatic connection management (Recommended)
+# 1. Automatic connection management (Recommended for single operations)
 with pool.client() as client:
     db = Db(client)
     result = db.select("users", ["*"])
     # Connection automatically returned to pool on exit
+
+# 2. Manual connection management (Required for transaction control)
+client = pool.get_client()
+try:
+    db = Db(client)
+    
+    # Begin transaction (database-specific)
+    db.execute("BEGIN")
+    
+    # Multiple operations in same transaction
+    db.insert("users", {"name": "John", "email": "john@test.com"})
+    db.update("users", {"status": "active"}, {"name": "John"})
+    
+    # Commit transaction
+    db.execute("COMMIT")
+    
+finally:
+    pool.close_client(client)  # Always return to pool
 ```
 
-**Benefits:**
-- Automatic connection checkout and checkin
-- Proper cleanup even if exceptions occur
-- Prevents connection leaks
-- Thread-safe operation
+**Connection Patterns:**
+- **Context Manager (`with pool.client()`)**: Automatic transactional scope - each `with` block is isolated
+- **Manual Management (`pool.get_client()`)**: Full transaction control - multiple operations can share same connection/transaction
 
 #### 1. SELECT Operations
 ```python
@@ -214,6 +230,43 @@ with pool.client() as client:
 
 ### Special Features
 
+#### Placeholder Support
+
+The library supports **both positional and named placeholders** automatically:
+
+- **Positional placeholders**: `%s` (PostgreSQL/MySQL), `?` (other databases)
+- **Named placeholders**: `:name` (colon style), `%(name)s` (percent style), `$name` (dollar style)
+- **Automatic detection**: The library automatically detects and converts named placeholders to positional format
+
+```python
+with pool.client() as client:
+    db = Db(client)
+    
+    # ✅ Positional placeholders (traditional)
+    result = db.query("SELECT * FROM users WHERE name = %s AND age = %s", ["John", 25])
+    
+    # ✅ Named placeholders (colon style)
+    result = db.query(
+        "SELECT * FROM users WHERE name = :name AND age = :age", 
+        {"name": "John", "age": 25}
+    )
+    
+    # ✅ Named placeholders (percent style)
+    result = db.query(
+        "SELECT * FROM users WHERE name = %(name)s AND age = %(age)s",
+        {"name": "John", "age": 25}
+    )
+    
+    # ✅ Named placeholders (dollar style)
+    result = db.query(
+        "SELECT * FROM users WHERE name = $name AND age = $age",
+        {"name": "John", "age": 25}
+    )
+    
+    # ✅ CRUD operations with JSON conditions (automatic positional placeholders)
+    result = db.select("users", ["*"], where={"name": "John", "age": 25})
+```
+
 #### CURRENT Keywords Support
 ```python
 with pool.client() as client:
@@ -246,11 +299,11 @@ python setup.py sdist bdist_wheel  # Build package
 ### Testing
 ```bash
 # Run comprehensive test suites
-python longjrm/tests/insert_test.py    # Test insert operations
-python longjrm/tests/update_test.py    # Test update operations  
-python longjrm/tests/delete_test.py    # Test delete operations
-python longjrm/tests/connection_test.py # Test connections
-python longjrm/tests/pool_test.py      # Test connection pooling
+python longjrm/tests/insert_test.py      # Test insert operations
+python longjrm/tests/delete_test.py      # Test delete operations
+python longjrm/tests/merge_test.py       # Test merge operations
+python longjrm/tests/connection_test.py  # Test connections
+python longjrm/tests/placeholder_test.py # Test placeholder handling
 ```
 
 ## Configuration
@@ -340,11 +393,15 @@ Each database operation requires a "client" object containing:
 - **Package**: longjrm
 
 ### Dependencies
+
+**Database Drivers (installed based on database needs):**
 - PyMySQL ~= 1.1.0 (MySQL support)
-- DBUtils ~= 3.0.3 (Connection pooling)
-- python-dotenv ~= 1.0.0 (Environment variables)
-- setuptools ~= 65.5.1 (Package building)
-- cryptography = 42.0.2 (Security support)
+- psycopg2-binary ~= 2.9.0 (PostgreSQL support)
+- pymongo ~= 4.6.0 (MongoDB support)
+
+**Connection Pooling:**
+- SQLAlchemy ~= 2.0.0 (Advanced connection pooling backend)
+- DBUtils ~= 3.0.3 (Lightweight connection pooling backend)
 
 ## Development Guidelines
 

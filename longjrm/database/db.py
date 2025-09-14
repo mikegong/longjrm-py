@@ -13,7 +13,9 @@ import json
 import datetime
 import logging
 import traceback
+from typing import Union, List, Tuple, Dict, Any
 from longjrm.config.runtime import get_config
+from longjrm.database.placeholder_handler import PlaceholderHandler
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ class Db:
             self.placeholder = '?'  # temporary placeholder for future database libraries
         jrm_cfg = get_config()
         self.data_fetch_limit = jrm_cfg.data_fetch_limit
+        self.placeholder_handler = PlaceholderHandler()
 
     @staticmethod
     def check_current_keyword(string):
@@ -238,6 +241,13 @@ class Db:
                     param_index += 1
                     arr_values.append(clean_value)
                     arr_cond.append(f"{column} {operator} {placeholder}")
+            elif isinstance(value, list) and operator.upper() == 'IN':
+                # Special handling for IN operator with list values
+                placeholders = ', '.join([placeholder] * len(value))
+                arr_cond.append(f"{column} {operator} ({placeholders})")
+                for list_item in value:
+                    param_index += 1
+                    arr_values.append(list_item)
             else:
                 param_index += 1
                 arr_values.append(value)
@@ -361,7 +371,7 @@ class Db:
             raise ValueError('Invalid columns')
 
         str_where, arr_values = Db.where_parser(where, self.placeholder)
-        str_order = ' order by ' + ', '.join(options['order_by']) if options['order_by'] else ''
+        str_order = ' order by ' + ', '.join(options.get('order_by', [])) if options.get('order_by') else ''
         str_limit = '' if not options.get('limit') or options.get('limit') == 0 else ' limit ' + str(options['limit'])
 
         select_query = "select " + str_column + " from " + table + str_where + str_order + str_limit
@@ -389,7 +399,7 @@ class Db:
 
     def query(self, sql, arr_values=None, collection_name=None):
         # execute query with small result set, return entire result set, etc.
-        # arr_values: values that need to be bound to query
+        # arr_values: values that need to be bound to query (supports both positional and named placeholders)
         # collection_name is used for MongoDb only
         # for MongoDb query, sql will be a dictionary that contains query parameters, we just re-use the name of sql
         logger.debug(f"Query: {sql}")
@@ -404,9 +414,13 @@ class Db:
                 else:
                     import pymysql
                     cur = self.conn.cursor(pymysql.cursors.DictCursor)
-                # scan query input values to exclude CURRENT keyword
+                
+                # Handle named placeholders by converting to positional
                 if arr_values:
-                    sql, processed_values = Db.inject_current(sql, arr_values, self.placeholder)
+                    sql, converted_values = self.placeholder_handler.convert_to_positional(
+                        sql, arr_values, self.placeholder
+                    )
+                    sql, processed_values = Db.inject_current(sql, converted_values, self.placeholder)
                 else:
                     processed_values = arr_values
                     
@@ -679,7 +693,7 @@ class Db:
         Execute prepared query with multiple value sets for performance
         Args:
             sql: SQL statement to prepare (for SQL databases) or operation dict (for MongoDB)
-            values_list: list of value arrays for multiple executions [[val1, val2], [val3, val4], ...]
+            values_list: list of value arrays for multiple executions (supports both positional and named placeholders)
             collection_name: MongoDB collection name (optional)
         Returns:
             list of dictionaries with data, columns, and count for each execution
@@ -692,6 +706,20 @@ class Db:
 
         try:
             if self.database_type in ['mysql', 'postgres', 'postgresql']:
+                # Handle named placeholders by converting to positional for all value sets
+                converted_values_list = []
+                converted_sql = sql
+                for values in values_list:
+                    if values:
+                        converted_sql, converted_values = self.placeholder_handler.convert_to_positional(
+                            sql, values, self.placeholder
+                        )
+                        converted_values_list.append(converted_values)
+                    else:
+                        converted_values_list.append(values)
+                
+                values_list = converted_values_list
+                sql = converted_sql
                 # SQL databases with prepared statements
                 if self.database_type in ['postgres', 'postgresql']:
                     import psycopg2.extras
@@ -765,7 +793,7 @@ class Db:
         Execute prepared statement with multiple value sets for performance
         Args:
             sql: SQL statement to prepare (for SQL databases) or operation dict (for MongoDB)
-            values_list: list of value arrays for multiple executions [[val1, val2], [val3, val4], ...]
+            values_list: list of value arrays for multiple executions (supports both positional and named placeholders)
         Returns:
             list of dictionaries with status, message, data (empty), and total for each execution
         """
@@ -777,6 +805,21 @@ class Db:
 
         try:
             if self.database_type in ['mysql', 'postgres', 'postgresql']:
+                # Handle named placeholders by converting to positional for all value sets
+                converted_values_list = []
+                converted_sql = sql
+                for values in values_list:
+                    if values:
+                        converted_sql, converted_values = self.placeholder_handler.convert_to_positional(
+                            sql, values, self.placeholder
+                        )
+                        converted_values_list.append(converted_values)
+                    else:
+                        converted_values_list.append(values)
+                
+                values_list = converted_values_list
+                sql = converted_sql
+                
                 # SQL databases with prepared statements
                 cur = self.conn.cursor()
 
@@ -899,7 +942,7 @@ class Db:
         Execute query with no return result set such as insert, update, delete, etc.
         Args:
             sql: SQL statement to execute (for SQL databases) or operation dict (for MongoDB)
-            values: values that need to be bound to query (optional, for SQL databases only)
+            values: values that need to be bound to query (supports both positional and named placeholders)
         Returns:
             dictionary with status, message, data (empty), and total (affected rows)
         """
@@ -911,6 +954,12 @@ class Db:
 
         try:
             if self.database_type in ['mysql', 'postgres', 'postgresql']:
+                # Handle named placeholders by converting to positional
+                if values:
+                    sql, converted_values = self.placeholder_handler.convert_to_positional(
+                        sql, values, self.placeholder
+                    )
+                    values = converted_values
                 # Get appropriate cursor for the database type
                 if self.database_type in ['postgres', 'postgresql']:
                     cur = self.conn.cursor()
