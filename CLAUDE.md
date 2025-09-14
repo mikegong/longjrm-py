@@ -341,9 +341,7 @@ python longjrm/tests/placeholder_test.py # Test placeholder handling
 
 ### Environment Configuration
 ```bash
-# Option 1: Environment variables (when USE_DOTENV=true)
-USE_DOTENV=true
-DOTENV_PATH=.env
+# Option 1: Environment variables
 
 # Option 2: JSON configuration files (recommended)
 python -c "
@@ -384,7 +382,7 @@ Each database operation requires a "client" object containing:
 - `conn`: Database connection/pool object
 - `database_type`: Type identifier (mysql, postgres, mongodb, etc.)  
 - `database_name`: Logical database name
-- `db_lib`: Library identifier (typically "dbutils")
+- `db_lib`: Python database driver such as psycopg2, pymysql, pymongo
 
 ## Package Information
 
