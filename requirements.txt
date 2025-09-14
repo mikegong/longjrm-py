@@ -1,5 +1,8 @@
+# Database drivers (imported conditionally based on database type)
 PyMySQL~=1.1.0
+psycopg2-binary~=2.9.0
+pymongo~=4.6.0
+
+# Connection pooling backends
+SQLAlchemy~=2.0.0
 DBUtils~=3.0.3
-python-dotenv~=1.0.0
-setuptools~=65.5.1
-cryptography=42.0.2

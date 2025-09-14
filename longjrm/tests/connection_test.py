@@ -1,20 +1,31 @@
-import longjrm.load_env as jrm_env
+import logging
+from longjrm.config.config import JrmConfig
 from longjrm.connection.dbconn import DatabaseConnection
+from longjrm.config.runtime import configure
 
+# Configure logging to output to console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
 
-database = {'mysql': 'mysql-test',
-            'postgres': 'postgres-test',
-            'mongodb': 'mongodb-test'
-            }
+logger = logging.getLogger(__name__)
 
-dbtype = 'mysql'
+db_key = "postgres-test"
+#db_key = "mysql-test"
+#db_key = "mongodb-test"
 
-dbinfo = jrm_env.dbinfos[database[dbtype]]
-db_connection = DatabaseConnection(dbinfo)
+cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+# inject the configuration into the runtime
+configure(cfg)
+db_cfg = cfg.require(db_key)
+
+db_connection = DatabaseConnection(db_cfg)
 
 try:
     conn = db_connection.connect()
-    if dbtype != 'mongodb':
+    if db_cfg.type not in ['mongodb', 'mongodb+srv']:
         with conn.cursor() as cursor:
             # Read a single record
             sql = "SELECT * from sample"
@@ -23,14 +34,16 @@ try:
             print(result)
     else:
         # database name has to be defined for the mongodb connection
-        result1 = conn[dbinfo['database']]['Listing'].find_one()
+        result1 = conn[db_cfg.database]['Listing'].find_one()
         print(result1)
         result2 = []
         where = {'guestCount': 4, 'roomCount': 2}
         select_query = {'filter': where, 'limit': 1}
-        res_cur = conn[dbinfo['database']]['Listing'].find(**select_query)
+        res_cur = conn[db_cfg.database]['Listing'].find(**select_query)
         for row in res_cur:
             result2.append(row)
         print(result2)
 except Exception as e:
     print(e)
+finally:
+    db_connection.close()

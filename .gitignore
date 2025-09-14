@@ -1,8 +1,10 @@
 .env
 .idea
 .vscode
+.claude
 longjrm.log
-dbinfos_dev.json
+jrm.config.json
+dbinfos.json
 longjrm.egg-info
 __pycache__
 build

@@ -1,35 +1,49 @@
-from longjrm.connection.pool import Pools
+import logging
+from longjrm.config.config import JrmConfig
+from longjrm.config.runtime import configure
+from longjrm.connection.pool import Pool, PoolBackend
 from longjrm.database.db import Db
 
 
-database = {'mysql': 'mysql-test',
-            'postgres': 'postgres-test',
-            'mongodb': 'mongodb-test'
-            }
+# Configure logging to output to console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
 
-dbtype = 'mysql'
+logger = logging.getLogger(__name__)
 
-pools = Pools()
-pools.start_pool(database[dbtype])
-client = pools.get_client(database[dbtype])
+db_key = "postgres-test"
+#db_key = "mysql-test"
+#db_key = "mongodb-test"
 
-db = Db(client)
+cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+# inject the configuration into the runtime
+configure(cfg)
+db_cfg = cfg.require(db_key)
 
-# result = db.query("SELECT VERSION()")
+pools = {}
+pools[db_key] = Pool.from_config(db_cfg, PoolBackend.DBUTILS)
 
-if dbtype == 'mongodb':
-    result = db.select(table='Listing', where={'guestCount': 4, 'roomCount': 2})
-    print(result)
-else:
-    result1 = db.select(table='sample', columns=['*'], where={'c1': 'a'})
-    result2 = db.select(table='sample', columns=['*'], where={'c2': 3})
-    print(result1)
-    print(result2)
+with pools[db_key].client() as client:
+    db = Db(client)
+    
+    # result = db.query("SELECT VERSION()")
+    
+    if db.database_type == 'mongodb':
+        result = db.select(table='Listing', where={'guestCount': 4, 'roomCount': 2})
+        print(result)
+    else:
+        result1 = db.select(table='sample', columns=['*'], where={'c1': 'a'})
+        result2 = db.select(table='sample', columns=['*'], where={'c2': 3})
+        print(result1)
+        print(result2)
+    
+    # cursor = conn.cursor()
+    # cursor.execute("SELECT VERSION()")
+    # version = cursor.fetchone()
+    # print("Database version:", version)
+    # Make sure to close the connection
 
-# cursor = conn.cursor()
-# cursor.execute("SELECT VERSION()")
-# version = cursor.fetchone()
-# print("Database version:", version)
-# Make sure to close the connection
-
-pools.release_connection(client)
+pools[db_key].dispose()

@@ -1,0 +1,17 @@
+{
+    "jrm_db_default": "postgres-test",
+    "jrm_db_dsn": "postgres://postgres:postgres@localhost:5432/test",
+    "jrm_db_key": "mysql-test",
+    "jrm_db_type": "mysql",
+    "jrm_db_host": "localhost",
+    "jrm_db_port": 3306,
+    "jrm_db_user": "root",
+    "jrm_db_password": "",
+    "jrm_db_name": "test",
+    "jrm_db_options": "",
+    "jrm_connect_timeout": 40,
+    "jrm_data_fetch_limit": 1000,
+    "jrm_min_conn_pool_size": 1,
+    "jrm_max_cached_conn": 5,
+    "jrm_pool_timeout": 60
+}
