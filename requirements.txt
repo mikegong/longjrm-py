@@ -4,5 +4,5 @@ psycopg2-binary~=2.9.0
 pymongo~=4.6.0
 
 # Connection pooling backends
-SQLAlchemy~=2.0.0
+# SQLAlchemy~=2.0.0  # Optional: Advanced connection pooling (install via: pip install longjrm[sqlalchemy])
 DBUtils~=3.0.3

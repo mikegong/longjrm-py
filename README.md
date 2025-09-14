@@ -44,16 +44,52 @@ Database type mappings are defined in `longjrm/connection/driver_map.json`.
 
 ## Installation
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+### Basic Installation
 
-# Install package in development mode
+```bash
+# Install core package with DBUtils pooling
+pip install longjrm
+
+# Or install from source
+pip install -e .
+```
+
+### Installation with Optional Dependencies
+
+```bash
+# Install with SQLAlchemy support for advanced connection pooling
+pip install longjrm[sqlalchemy]
+
+# Install with all optional dependencies
+pip install longjrm[all]
+
+# Development installation with optional dependencies
+pip install -e .[sqlalchemy]
+```
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd longjrm-py
+
+# Install in development mode with all dependencies
+pip install -e .[all]
+
+# Or install dependencies manually
+pip install -r requirements.txt
 pip install -e .
 
 # Build package
 python setup.py sdist bdist_wheel
 ```
+
+### Dependency Overview
+
+- **Core dependencies**: PyMySQL, psycopg2-binary, pymongo, DBUtils (always installed)
+- **Optional dependencies**: 
+  - `sqlalchemy`: SQLAlchemy ~= 2.0.0 for advanced connection pooling features
 
 ## Configuration
 
