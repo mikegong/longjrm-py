@@ -678,6 +678,7 @@ class DatabaseConnection:
     def __init__(self, db_cfg: DatabaseConfig)
     def connect() -> Any  # Returns db-specific connection object
     def set_autocommit(self, autocommit: bool) -> None
+    def set_isolation_level(self, isolation_level: str) -> None
     def close() -> None
 ```
 
@@ -693,12 +694,138 @@ class Pool:
         sa_opts: Optional[Mapping[str, Any]] = None,
         dbutils_opts: Optional[Mapping[str, Any]] = None,
     ) -> "Pool"
-    
+
     def client() -> Iterator[dict[str, Any]]  # Context manager
+    def transaction(isolation_level: Optional[str] = None) -> Iterator[TransactionContext]  # Transaction context manager
+    def execute_transaction(operations_func: Callable, isolation_level: Optional[str] = None) -> Any
+    def execute_batch(operations: List[Dict[str, Any]], isolation_level: Optional[str] = None) -> List[Any]
     def dispose() -> None
+
+class TransactionContext:
+    def __init__(self, client: Dict[str, Any])
+    def commit() -> None
+    def rollback() -> None
     
     @property
     def config() -> DatabaseConfig
+```
+
+## Transaction Management
+
+### Basic Transaction Usage
+
+```python
+# Simple transaction with auto-commit
+with pool.transaction() as tx:
+    db = Db(tx.client)
+    db.insert("users", {"name": "John", "email": "john@example.com"})
+    db.update("profiles", {"active": True}, {"user_id": 123})
+    # Auto-commit on success, auto-rollback on exception
+
+# Transaction with isolation level
+with pool.transaction(isolation_level="READ COMMITTED") as tx:
+    db = Db(tx.client)
+    db.insert("orders", order_data)
+    db.update("inventory", {"quantity": new_qty}, {"product_id": pid})
+
+# Manual transaction control
+with pool.transaction() as tx:
+    db = Db(tx.client)
+    try:
+        db.insert("users", user_data)
+        validate_user_data(user_data)
+        tx.commit()  # Manual commit
+    except ValidationError:
+        tx.rollback()  # Manual rollback
+        raise
+```
+
+### Function-Based Transactions
+
+```python
+# Execute function in transaction
+def create_user_with_profile(db):
+    user_id = db.insert("users", {"name": "John"})
+    db.insert("profiles", {"user_id": user_id, "bio": "Developer"})
+    return user_id
+
+result = pool.execute_transaction(create_user_with_profile)
+
+# Batch operations
+operations = [
+    {"method": "insert", "params": {"table": "users", "data": {"name": "John"}}},
+    {"method": "update", "params": {"table": "profiles", "data": {"active": True}, "where": {"user_id": 123}}}
+]
+results = pool.execute_batch(operations)
+```
+
+### Isolation Levels
+
+Supported isolation levels by database:
+
+**PostgreSQL:**
+- `READ UNCOMMITTED`
+- `READ COMMITTED` (default)
+- `REPEATABLE READ`
+- `SERIALIZABLE`
+
+**MySQL:**
+- `READ UNCOMMITTED`
+- `READ COMMITTED`
+- `REPEATABLE READ` (default)
+- `SERIALIZABLE`
+
+**SQLite:**
+- Limited isolation level support (warning logged)
+
+```python
+# Set isolation level for specific transaction
+with pool.transaction(isolation_level="SERIALIZABLE") as tx:
+    db = Db(tx.client)
+    # Critical operations requiring highest isolation
+    db.transfer_funds(from_account, to_account, amount)
+```
+
+## Connection Lifecycle Management
+
+### Autocommit Management
+
+The pool automatically manages autocommit settings:
+
+- **Default State**: All connections have `autocommit=True` by default
+- **Transaction Mode**: `pool.transaction()` sets `autocommit=False` for grouped operations
+- **Cleanup**: Connections returned to pool always have `autocommit=True` restored
+
+### Backend-Specific Behavior
+
+**DBUtils Backend:**
+- Uses custom reset function on connection check-in
+- Calls `conn.set_autocommit(True)` when returning to pool
+- Leverages DBUtils' built-in rollback functionality
+
+**SQLAlchemy Backend:**
+- Uses checkout event to normalize connection state
+- Enforces `autocommit=True` when connections leave pool
+- Integrates with SQLAlchemy's `pool_reset_on_return="rollback"`
+
+### Connection State Consistency
+
+```python
+# All these patterns ensure consistent connection state:
+
+# Simple usage - autocommit=True by default
+with pool.client() as client:
+    db = Db(client)
+    db.insert("logs", {"message": "test"})  # Auto-committed
+
+# Transaction usage - autocommit=False during transaction
+with pool.transaction() as tx:
+    db = Db(tx.client)
+    db.insert("users", data1)     # Part of transaction
+    db.insert("profiles", data2)  # Part of transaction
+    # Auto-commit at end, autocommit=True restored
+
+# Connection returned to pool always has autocommit=True
 ```
 
 #### PoolBackend

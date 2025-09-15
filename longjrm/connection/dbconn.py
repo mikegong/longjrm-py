@@ -131,6 +131,20 @@ class DatabaseConnection(object):
             logger.info(f"Failed to close client connection: {e}")
             pass
 
+    def set_isolation_level(self, isolation_level: str):
+        """Set transaction isolation level."""
+        try:
+            if self.database_type.lower() in ['postgres', 'postgresql']:
+                self.conn.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+            elif self.database_type.lower() == 'mysql':
+                self.conn.execute(f"SET SESSION TRANSACTION ISOLATION LEVEL {isolation_level}")
+            elif self.database_type.lower() == 'sqlite':
+                # SQLite has limited isolation level support
+                logger.warning("SQLite has limited isolation level support")
+            else:
+                logger.warning(f"Isolation level setting not implemented for {self.database_type}")
+        except Exception as e:
+            raise ValueError(f"Failed to set isolation level {isolation_level} for {self.database_type}: {e}")
 
 def enforce_autocommit(dbapi_conn, database_type):
     try:
