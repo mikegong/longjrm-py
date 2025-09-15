@@ -2,16 +2,16 @@ from setuptools import setup, find_packages
 
 # Core dependencies (always required)
 install_requires = [
-    "PyMySQL~=1.1.0",
-    "psycopg2-binary~=2.9.0", 
-    "pymongo~=4.6.0",
-    "DBUtils~=3.0.3",
+    "PyMySQL>=1.1.0,<2.0.0",
+    "psycopg2-binary>=2.9.0,<3.0.0", 
+    "pymongo>=4.6.0,<5.0.0",
+    "DBUtils>=3.0.3,<4.0.0",
 ]
 
 # Optional dependencies
 extras_require = {
-    "sqlalchemy": ["SQLAlchemy~=2.0.0"],
-    "all": ["SQLAlchemy~=2.0.0"],  # Install all optional dependencies
+    "sqlalchemy": ["SQLAlchemy>=2.0.0,<3.0.0"],
+    "all": ["SQLAlchemy>=2.0.0,<3.0.0"],  # Install all optional dependencies
 }
 
 setup(
