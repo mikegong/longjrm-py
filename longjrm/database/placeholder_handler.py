@@ -22,7 +22,7 @@ class PlaceholderHandler:
     
     # Regex patterns for different placeholder styles
     NAMED_PATTERNS = {
-        'colon': re.compile(r':(\w+)'),           # :name
+        'colon': re.compile(r'(?<!:):(\w+)(?!\w|::)'),           # :name (but not ::type cast operators)
         'percent': re.compile(r'%\((\w+)\)s'),    # %(name)s
         'dollar': re.compile(r'\$(\w+)')          # $name
     }
