@@ -840,10 +840,6 @@ class Db:
                             
                             affected_rows = cur.rowcount
                             
-                            # Commit the transaction
-                            if hasattr(self.conn, 'commit'):
-                                self.conn.commit()
-                            
                             success_msg = f"Prepared SQL statement succeeded. {affected_rows} rows affected."
                             results.append({
                                 "status": 0,
@@ -853,11 +849,6 @@ class Db:
                             })
                             
                         except Exception as e:
-                            if hasattr(self.conn, 'rollback'):
-                                try:
-                                    self.conn.rollback()
-                                except:
-                                    pass
                             error_msg = f"Prepared execution failed: {e}"
                             results.append({
                                 "status": -1,
@@ -885,9 +876,6 @@ class Db:
                             
                             affected_rows = cur.rowcount
                             
-                            if hasattr(self.conn, 'commit'):
-                                self.conn.commit()
-                            
                             success_msg = f"Prepared SQL statement succeeded. {affected_rows} rows affected."
                             results.append({
                                 "status": 0,
@@ -897,11 +885,6 @@ class Db:
                             })
                             
                         except Exception as e:
-                            if hasattr(self.conn, 'rollback'):
-                                try:
-                                    self.conn.rollback()
-                                except:
-                                    pass
                             error_msg = f"Prepared execution failed: {e}"
                             results.append({
                                 "status": -1,
@@ -981,10 +964,6 @@ class Db:
                 # Get affected row count
                 affected_rows = cur.rowcount
                 
-                # Commit the transaction (if autocommit is off)
-                if hasattr(self.conn, 'commit'):
-                    self.conn.commit()
-                
                 cur.close()
                 
                 success_msg = f"SQL statement succeeded. {affected_rows} rows is affected."
@@ -1006,13 +985,6 @@ class Db:
                 return {"status": -1, "message": error_msg, "data": [], "total": 0}
 
         except Exception as e:
-            # Rollback on SQL database errors
-            if self.database_type in ['mysql', 'postgres', 'postgresql'] and hasattr(self.conn, 'rollback'):
-                try:
-                    self.conn.rollback()
-                except:
-                    pass  # Ignore rollback errors
-                    
             error_msg = f"Failed to execute statement: {e}"
             logger.error(error_msg)
             logger.error(traceback.format_exc())

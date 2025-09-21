@@ -20,6 +20,13 @@ setup(
     author="Mike Gong at LONGINFO",
     description="JRM Library for Python",
     packages=find_packages(),
+    include_package_data=True, 
+    package_data={
+        'longjrm': [
+            'connection/driver_map.json',
+            # Add other non-Python files here
+        ],
+    },
     install_requires=install_requires,
     extras_require=extras_require,
     python_requires=">=3.8",
