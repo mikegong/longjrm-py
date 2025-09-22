@@ -428,6 +428,7 @@ class Db:
                 sql = Db.escape_sql_for_database(sql, self.database_type, self.placeholder)
                     
                 cur.execute(sql, processed_values)
+                logger.debug(f"Query executed: {sql}")
                 rows = cur.fetchall()
                 columns = list(rows[0].keys()) if len(rows) > 0 else []
                 cur.close()
@@ -511,11 +512,11 @@ class Db:
             if self.database_type in ['mongodb', 'mongodb+srv']:
                 # MongoDB uses different approach - construct operation object
                 insert_operation = self.mongo_insert_constructor(table, data)
-                return self.execute(insert_operation)
+                return self.query(insert_operation)
             else:
                 # SQL databases - construct SQL and values, then use execute()
                 insert_query, arr_values = self.insert_constructor(table, data, return_columns)
-                return self.execute(insert_query, arr_values)
+                return self.query(insert_query, arr_values)
         except Exception as e:
             logger.error(f"insert method failed: {e}")
             raise
