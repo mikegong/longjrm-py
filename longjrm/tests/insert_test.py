@@ -90,7 +90,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         # Clean up any existing test data
         try:
             result = db.execute("DELETE FROM test_users WHERE email LIKE '%@test.com'")
-            print(f"SUCCESS: Cleaned up {result['total']} existing test records")
+            print(f"SUCCESS: Cleaned up {result['count']} existing test records")
         except Exception as e:
             print(f"WARNING: Could not clean up test data (table may not exist): {e}")
             # Continue with tests anyway
@@ -108,7 +108,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         result = db.insert("test_users", single_record)
         print(f"Single insert result: {result}")
         assert result["status"] == 0, "Single insert should succeed"
-        assert result["total"] >= 1, "Single insert should affect at least 1 row"
+        assert result["count"] >= 1, "Single insert should affect at least 1 row"
         
         # Test 2: Bulk insert with multiple records
         print("\n--- Test 2: Bulk Insert ---")
@@ -139,7 +139,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         result = db.insert("test_users", bulk_records)
         print(f"Bulk insert result: {result}")
         assert result["status"] == 0, "Bulk insert should succeed"
-        assert result["total"] >= 3, "Bulk insert should affect at least 3 rows"
+        assert result["count"] >= 3, "Bulk insert should affect at least 3 rows"
         
         # Test 3: Insert with RETURNING (PostgreSQL only)
         if db.database_type in ['postgres', 'postgresql']:
@@ -152,10 +152,10 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
                 "tags": ["devops", "kubernetes", "aws"]
             }
             
-            result = db.insert("test_users", return_record, return_columns=["id", "name", "created_at"])
+            result = db.insert("test_users", return_record, return_columns=["id", "name", "updated_at"])
             print(f"Insert with RETURNING result: {result}")
             assert result["status"] == 0, "RETURNING insert should succeed"
-            assert result["total"] == 1, "RETURNING insert should affect exactly 1 row"
+            assert result["count"] == 1, "RETURNING insert should affect exactly 1 row"
             # Note: With execute method, RETURNING data is handled by database API, not returned in result
         
         # Test 4: Insert with CURRENT timestamp (test CURRENT keyword handling)
@@ -166,26 +166,26 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             "age": 29,
             "metadata": {"department": "QA", "level": "Senior"},
             "tags": ["testing", "automation"],
-            "created_at": "`CURRENT_TIMESTAMP`"  # Test CURRENT keyword
+            "updated_at": "`CURRENT_TIMESTAMP`"  # Test CURRENT keyword
         }
         
         result = db.insert("test_users", current_record)
         print(f"Insert with CURRENT keyword result: {result}")
         assert result["status"] == 0, "CURRENT keyword insert should succeed"
-        assert result["total"] >= 1, "CURRENT keyword insert should affect at least 1 row"
+        assert result["count"] >= 1, "CURRENT keyword insert should affect at least 1 row"
         
         # Test 5: Empty list handling
         print("\n--- Test 5: Empty List Handling ---")
         result = db.insert("test_users", [])
         print(f"Empty list insert result: {result}")
         assert result["status"] == 0, "Empty list insert should succeed"
-        assert result["total"] == 0, "Empty list should result in 0 affected rows"
+        assert result["count"] == 0, "Empty list should result in 0 affected rows"
         
         # Verify all inserts worked by counting records
         try:
             count_result = db.query("SELECT COUNT(*) as total FROM test_users WHERE email LIKE '%@test.com'")
             if count_result["data"]:
-                total_inserted = count_result["data"][0]["total"]
+                total_inserted = count_result["count"]
                 print(f"\nSUCCESS: Total test records in database: {total_inserted}")
             else:
                 print(f"\nSUCCESS: Could not count records, but tests completed")
@@ -195,7 +195,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         # Clean up test data
         try:
             result = db.execute("DELETE FROM test_users WHERE email LIKE '%@test.com'")
-            print(f"SUCCESS: Cleaned up {result['total']} test records")
+            print(f"SUCCESS: Cleaned up {result['count']} test records")
         except Exception as e:
             print(f"WARNING: Could not clean up test data: {e}")
     
@@ -240,7 +240,7 @@ def test_mongodb_database(db_key):
         result = db.insert("test_users", single_doc)
         print(f"Single insert result: {result}")
         assert result["status"] == 0, "Single insert should succeed"
-        assert result["total"] == 1, "Single insert should affect exactly 1 document"
+        assert result["count"] == 1, "Single insert should affect exactly 1 document"
         
         # Test 2: Bulk insert with multiple documents
         print("\n--- Test 2: Bulk Insert ---")
@@ -274,14 +274,14 @@ def test_mongodb_database(db_key):
         result = db.insert("test_users", bulk_docs)
         print(f"Bulk insert result: {result}")
         assert result["status"] == 0, "Bulk insert should succeed"
-        assert result["total"] == 3, "Bulk insert should affect exactly 3 documents"
+        assert result["count"] == 3, "Bulk insert should affect exactly 3 documents"
         
         # Test 3: Empty list handling
         print("\n--- Test 3: Empty List Handling ---")
         result = db.insert("test_users", [])
         print(f"Empty list insert result: {result}")
         assert result["status"] == 0, "Empty list insert should succeed" 
-        assert result["total"] == 0, "Empty list should result in 0 affected documents"
+        assert result["count"] == 0, "Empty list should result in 0 affected documents"
         
         # Verify all inserts worked by counting documents
         count_query = {"operation": "count", "filter": {"email": {"$regex": "@test.com$"}}}

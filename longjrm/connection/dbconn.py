@@ -42,7 +42,6 @@ class DatabaseConnection(object):
         self.sqlcode = 0
         self.conn = None  # database connection
         self.pconn = None  # persistent connection
-        self.client = None  # database connection client, includes connection object and customized attributes
 
         # Load driver map where to get the database module map
         driver_info = load_driver_map().get((db_cfg.type or "").lower())
@@ -123,14 +122,6 @@ class DatabaseConnection(object):
             logger.info(f"Failed to close connection: {e}")
             pass
 
-    def close_client(self):
-        try:
-            self.client['conn'].close()
-            logger.info(f"Closed client connection to {self.database_type} database '{self.database}'")
-        except Exception as e:
-            logger.info(f"Failed to close client connection: {e}")
-            pass
-
     def set_isolation_level(self, isolation_level: str):
         """Set transaction isolation level."""
         try:
@@ -146,15 +137,40 @@ class DatabaseConnection(object):
         except Exception as e:
             raise ValueError(f"Failed to set isolation level {isolation_level} for {self.database_type}: {e}")
 
-def enforce_autocommit(dbapi_conn, database_type):
+def set_autocommit(dbapi_conn, autocommit: bool):
+    """
+    Set autocommit mode on a raw DB-API connection.
+
+    Args:
+        dbapi_conn: Raw DB-API connection object
+        autocommit: True to enable autocommit, False to disable
+    """
     try:
         if hasattr(dbapi_conn, "autocommit") and not callable(getattr(dbapi_conn, "autocommit")):
-            dbapi_conn.autocommit = True        # psycopg/psycopg2
+            dbapi_conn.autocommit = autocommit        # psycopg/psycopg2 (property)
         elif hasattr(dbapi_conn, "autocommit") and callable(getattr(dbapi_conn, "autocommit")):
-            dbapi_conn.autocommit(True)         # PyMySQL
+            dbapi_conn.autocommit(autocommit)         # PyMySQL (method)
+        else:
+            raise ValueError(f"Autocommit not supported for connection type: {type(dbapi_conn).__name__}")
     except Exception as e:
-        raise ValueError(f"Function enforce_autocommit error for database type: {database_type}: {e}")
+        raise ValueError(f"Function set_autocommit error for this connection: {e}")
 
+
+def set_isolation_level(dbapi_conn, database_type, isolation_level: str):
+    """Set transaction isolation level."""
+    try:
+        if database_type.lower() in ['postgres', 'postgresql']:
+            dbapi_conn.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+        elif database_type.lower() == 'mysql':
+            dbapi_conn.execute(f"SET SESSION TRANSACTION ISOLATION LEVEL {isolation_level}")
+        elif database_type.lower() == 'sqlite':
+            # SQLite has limited isolation level support
+            logger.warning("SQLite has limited isolation level support")
+        else:
+            logger.error(f"Isolation level setting not implemented for {database_type}")
+            raise ValueError(f"Isolation level setting not implemented for {database_type}")
+    except Exception as e:
+        raise ValueError(f"Failed to set isolation level {isolation_level} for {database_type}: {e}")
 
 class JrmConnectionError(Exception):
     """Raise exception when a connection failed."""

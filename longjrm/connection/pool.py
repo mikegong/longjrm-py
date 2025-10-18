@@ -5,13 +5,43 @@ from enum import Enum
 from contextlib import contextmanager
 from longjrm.config.config import DatabaseConfig
 from longjrm.config.runtime import get_config
-from longjrm.connection.dbconn import DatabaseConnection, enforce_autocommit
+from longjrm.connection.dbconn import DatabaseConnection, set_autocommit, set_isolation_level
 from longjrm.connection.driver_registry import load_driver_map, sa_minimal_url
 from longjrm.database.db import Db
 
 
 logger = logging.getLogger(__name__)
 
+
+def _unwrap_connection(conn):
+    """
+    Unwrap pooling library wrappers to get the actual DB-API connection.
+
+    Handles multiple levels of wrapping from DBUtils and SQLAlchemy:
+    - DBUtils: PooledDedicatedDBConnection -> SteadyDBConnection -> actual connection
+    - DBUtils: SharedDBConnection -> SteadyDBConnection -> actual connection
+    - SQLAlchemy: ConnectionFairy -> actual connection
+
+    Args:
+        conn: A connection object that may be wrapped by pooling libraries
+
+    Returns:
+        The actual DB-API connection object
+    """
+    actual_conn = conn
+
+    # Unwrap DBUtils wrappers (may have multiple levels)
+    while hasattr(actual_conn, 'con') or hasattr(actual_conn, '_con'):
+        if hasattr(actual_conn, 'con'):  # SharedDBConnection
+            actual_conn = actual_conn.con
+        elif hasattr(actual_conn, '_con'):  # PooledDedicatedDBConnection or SteadyDBConnection
+            actual_conn = actual_conn._con
+
+    # Handle SQLAlchemy wrapper
+    if hasattr(actual_conn, 'dbapi_connection'):  # ConnectionFairy
+        actual_conn = actual_conn.dbapi_connection
+
+    return actual_conn
 
 
 class TransactionContext:
@@ -62,7 +92,7 @@ class _Backend:
 class _SABackend(_Backend):
     def __init__(self, db_cfg: DatabaseConfig, sa_opts: Optional[Mapping[str, Any]]):
         super().__init__(db_cfg)
-        from sqlalchemy import create_engine, event
+        from sqlalchemy import create_engine
 
         self._cfg = db_cfg
         jrm_cfg = get_config()
@@ -89,16 +119,13 @@ class _SABackend(_Backend):
         )
 
         logger.info(f"Created SQLAlchemy engine for {self._cfg.type} '{self._cfg.database}'")
-        
-        # Normalize connection state such as autocommit=True on checkout in ONE place (dbconn policy).
-        @event.listens_for(self._engine, "checkout")
-        def _on_checkout(dbapi_conn, conn_record, conn_proxy):
-            enforce_autocommit(dbapi_conn, self._cfg.type)
 
     def _get_client(self):
-        raw = self._engine.raw_connection()
+        fairy = self._engine.raw_connection()  # Returns _ConnectionFairy proxy
+        # Set autocommit on the actual connection (unwrap all pooling wrappers)
+        set_autocommit(_unwrap_connection(fairy), True)
         logger.debug(f"Got SQLAlchemy connection for {self._cfg.type} '{self._cfg.database}'")
-        return {"conn": raw,
+        return {"conn": fairy,
                 "database_type": self._cfg.type,
                 "database_name": self._cfg.database,
                 "db_lib": self.database_module}
@@ -121,43 +148,32 @@ class _DBUtilsBackend(_Backend):
         jrm_cfg = get_config()
         self.connect_timeout = jrm_cfg.connect_timeout
 
-        # Custom reset function to ensure autocommit=True on check-in (similar to SA checkout event)
-        def reset_connection_on_checkin(conn):
-            """Reset function called when connection is returned to pool."""
-            try:
-                # First rollback any pending transaction
-                conn.rollback()
-                logger.debug("Rolled back connection on check-in")
-            except Exception as e:
-                logger.debug(f"Rollback on check-in failed (may be expected): {e}")
-
-            try:
-                # Ensure autocommit=True when connection is returned to pool
-                conn.set_autocommit(True)
-                logger.debug("Set autocommit=True on check-in to pool")
-            except Exception as e:
-                logger.error(f"Could not set autocommit on check-in: {e}")
-
         opts: dict[str, Any] = {
             "maxconnections": (jrm_cfg.max_pool_size),
             "mincached":      (jrm_cfg.min_pool_size),
             "maxcached":      (jrm_cfg.max_cached_conn),
             "blocking": True,  # wait when exhausted
             "ping": 1,         # liveness on checkout
-            "reset": reset_connection_on_checkin,  # custom reset function for check-in
+            "reset": True      # Always rollback on return to pool
         }
         if dbutils_opts:
             opts.update(dbutils_opts)
 
         # Fresh DatabaseConnection per checkout -> no shared mutable state
-        self._pool = PooledDB(creator=lambda: DatabaseConnection(self._cfg).connect(), **opts)
+        # Create ONE DatabaseConnection instance to use as factory
+        self._db_connection = DatabaseConnection(self._cfg)
+        
+        # Use bound method as creator (more efficient than lambda)
+        self._pool = PooledDB(creator=self._db_connection.connect, **opts)
+        
         logger.info(f"Created DBUtils pool for {self._cfg.type} '{self._cfg.database}'")
 
     def _get_client(self):
-        raw = self._pool.connection()  # .close() -> returns to DBUtils pool
-
+        wrapper = self._pool.connection()  # May return various DBUtils wrapper types
+        # Set autocommit on the actual connection (unwrap all pooling wrappers)
+        set_autocommit(_unwrap_connection(wrapper), True)
         logger.debug(f"Got DBUtils connection for {self._cfg.type} '{self._cfg.database}'")
-        return {"conn": raw,
+        return {"conn": wrapper,
                 "database_type": self._cfg.type,
                 "database_name": self._cfg.database,
                 "db_lib": self.database_module
@@ -285,12 +301,15 @@ class Pool:
                 return
 
             raw_conn = client['conn']
-            raw_conn.set_autocommit(False)
+            # Set autocommit=False on the actual connection (unwrap all pooling wrappers)
+            actual_conn = _unwrap_connection(raw_conn)
+            set_autocommit(actual_conn, False)
 
             # Set isolation level if specified
             if isolation_level:
                 try:
-                    raw_conn.set_isolation_level(isolation_level)
+                    # Use actual connection for consistency
+                    set_isolation_level(actual_conn, client['database_type'], isolation_level)
                     logger.debug(f"Set isolation level to {isolation_level}")
                 except Exception as e:
                     logger.warning(f"Could not set isolation level {isolation_level}: {e}")
@@ -315,14 +334,15 @@ class Pool:
 
         except Exception as e:
             logger.error(f"Transaction context manager failed: {e}")
-            raise
+            raise e
         finally:
             if client is not None:
                 # Always restore autocommit=True before returning to pool
-                client['conn'].set_autocommit(True)
+                set_autocommit(_unwrap_connection(client['conn']), True)
 
                 # Return connection to pool
                 self.close_client(client)
+            
 
     def execute_transaction(self,
                           operations_func: Callable[['Db'], Any],

@@ -93,7 +93,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         # Clean up any existing test data
         try:
             result = db.execute("DELETE FROM test_merge_users WHERE email LIKE '%@mergetest.com'")
-            print(f"SUCCESS: Cleaned up {result['total']} existing test records")
+            print(f"SUCCESS: Cleaned up {result['count']} existing test records")
         except Exception as e:
             print(f"WARNING: Could not clean up test data: {e}")
         
@@ -112,7 +112,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         result = db.merge("test_merge_users", new_user, ["email"])
         print(f"Single merge (INSERT) result: {result}")
         assert result["status"] == 0, "Single merge insert should succeed"
-        assert result["total"] >= 1, "Single merge insert should affect at least 1 row"
+        assert result["count"] >= 1, "Single merge insert should affect at least 1 row"
         
         # Verify the record was inserted
         verify_result = db.query("SELECT * FROM test_merge_users WHERE email = 'john@mergetest.com'")
@@ -135,7 +135,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         result = db.merge("test_merge_users", updated_user, ["email"])
         print(f"Single merge (UPDATE) result: {result}")
         assert result["status"] == 0, "Single merge update should succeed"
-        assert result["total"] >= 1, "Single merge update should affect at least 1 row"
+        assert result["count"] >= 1, "Single merge update should affect at least 1 row"
         
         # Verify the record was updated
         verify_result = db.query("SELECT * FROM test_merge_users WHERE email = 'john@mergetest.com'")
@@ -177,7 +177,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         result = db.merge("test_merge_users", bulk_users, ["email"])
         print(f"Bulk merge result: {result}")
         assert result["status"] == 0, "Bulk merge should succeed"
-        assert result["total"] >= 3, "Bulk merge should affect at least 3 rows"
+        assert result["count"] >= 3, "Bulk merge should affect at least 3 rows"
         
         # Verify all records are present
         verify_result = db.query("SELECT * FROM test_merge_users WHERE email LIKE '%@mergetest.com' ORDER BY email")
@@ -245,7 +245,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         result = db.merge("test_user_roles", user_role, ["user_id", "role_id"])
         print(f"Multi-column key merge result: {result}")
         assert result["status"] == 0, "Multi-column key merge should succeed"
-        assert result["total"] >= 1, "Multi-column key merge should affect at least 1 row"
+        assert result["count"] >= 1, "Multi-column key merge should affect at least 1 row"
         
         # Update the same record
         updated_role = {
@@ -271,7 +271,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         result = db.merge("test_merge_users", {}, ["email"])
         print(f"Empty data merge result: {result}")
         assert result["status"] == 0, "Empty data merge should succeed"
-        assert result["total"] == 0, "Empty data should result in 0 affected rows"
+        assert result["count"] == 0, "Empty data should result in 0 affected rows"
         
         # Test 6: Error handling - empty key columns
         print("\n--- Test 6: Error Handling - Empty Key Columns ---")
@@ -297,7 +297,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         try:
             result1 = db.execute("DELETE FROM test_merge_users WHERE email LIKE '%@mergetest.com'")
             result2 = db.execute("DELETE FROM test_user_roles WHERE granted_by = 'merge_test'")
-            print(f"SUCCESS: Cleaned up {result1['total']} merge_users and {result2['total']} user_roles test records")
+            print(f"SUCCESS: Cleaned up {result1['count']} merge_users and {result2['count']} user_roles test records")
         except Exception as e:
             print(f"WARNING: Could not clean up test data: {e}")
     
@@ -342,7 +342,7 @@ def test_mongodb_database(db_key):
         result = db.merge("test_merge_users", new_user, ["email"])
         print(f"Single merge (UPSERT INSERT) result: {result}")
         assert result["status"] == 0, "Single merge upsert should succeed"
-        assert result["total"] >= 1, "Single merge upsert should affect at least 1 document"
+        assert result["count"] >= 1, "Single merge upsert should affect at least 1 document"
         
         # Verify the document was inserted
         collection = client.conn[db.database_name]["test_merge_users"]
@@ -366,7 +366,7 @@ def test_mongodb_database(db_key):
         result = db.merge("test_merge_users", updated_user, ["email"])
         print(f"Single merge (UPSERT UPDATE) result: {result}")
         assert result["status"] == 0, "Single merge update should succeed"
-        assert result["total"] >= 1, "Single merge update should affect at least 1 document"
+        assert result["count"] >= 1, "Single merge update should affect at least 1 document"
         
         # Verify the document was updated
         doc = collection.find_one({"email": "john@mergetest.com"})
@@ -408,7 +408,7 @@ def test_mongodb_database(db_key):
         result = db.merge("test_merge_users", bulk_users, ["email"])
         print(f"Bulk merge result: {result}")
         assert result["status"] == 0, "Bulk merge should succeed"
-        assert result["total"] >= 3, "Bulk merge should affect at least 3 documents"
+        assert result["count"] >= 3, "Bulk merge should affect at least 3 documents"
         
         # Verify all documents are present
         docs = list(collection.find({"email": {"$regex": "@mergetest.com$"}}).sort("email", 1))
@@ -447,7 +447,7 @@ def test_mongodb_database(db_key):
         result = db.merge("test_user_roles", user_role, ["user_id", "role_id"])
         print(f"Multi-field key merge result: {result}")
         assert result["status"] == 0, "Multi-field key merge should succeed"
-        assert result["total"] >= 1, "Multi-field key merge should affect at least 1 document"
+        assert result["count"] >= 1, "Multi-field key merge should affect at least 1 document"
         
         # Update the same document
         updated_role = {
@@ -512,7 +512,7 @@ def test_error_handling():
         print("\n--- Test: Empty Data Handling ---")
         result = db.merge("test_merge_users", [], ["email"])
         assert result["status"] == 0, "Empty list should succeed"
-        assert result["total"] == 0, "Empty list should affect 0 rows"
+        assert result["count"] == 0, "Empty list should affect 0 rows"
         print("SUCCESS: Empty data handled correctly")
         
         # Test empty key columns

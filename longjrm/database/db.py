@@ -433,7 +433,7 @@ class Db:
                 columns = list(rows[0].keys()) if len(rows) > 0 else []
                 cur.close()
                 logger.info(f"Query completed successfully with {len(rows)} rows returned")
-                return {"data": rows, "columns": columns, "count": len(rows)}
+                return {"status": 0, "message": "Query completed successfully", "data": rows, "columns": columns, "count": len(rows)}
 
             elif self.database_type in ['mongodb', 'mongodb+srv']:
                 return self._execute_mongo_query(sql, collection_name)
@@ -503,7 +503,7 @@ class Db:
                   - Multiple records: [{"col1": "val1"}, {"col1": "val2"}]
             return_columns: optional list of columns to return from inserted records
         Returns:
-            dictionary with status, message, data (empty), and total (affected rows)
+            dictionary with status, message, data (empty), and count (affected rows)
         """
         if return_columns is None:
             return_columns = []
@@ -516,7 +516,10 @@ class Db:
             else:
                 # SQL databases - construct SQL and values, then use execute()
                 insert_query, arr_values = self.insert_constructor(table, data, return_columns)
-                return self.query(insert_query, arr_values)
+                if return_columns:
+                    return self.query(insert_query, arr_values)
+                else:
+                    return self.execute(insert_query, arr_values)
         except Exception as e:
             logger.error(f"insert method failed: {e}")
             raise
@@ -796,7 +799,7 @@ class Db:
             sql: SQL statement to prepare (for SQL databases) or operation dict (for MongoDB)
             values_list: list of value arrays for multiple executions (supports both positional and named placeholders)
         Returns:
-            list of dictionaries with status, message, data (empty), and total for each execution
+            list of dictionaries with status, message, data (empty), and count for each execution
         """
         if not values_list:
             values_list = [[]]
@@ -846,7 +849,7 @@ class Db:
                                 "status": 0,
                                 "message": success_msg,
                                 "data": [],
-                                "total": affected_rows
+                                "count": affected_rows
                             })
                             
                         except Exception as e:
@@ -855,7 +858,7 @@ class Db:
                                 "status": -1,
                                 "message": error_msg,
                                 "data": [],
-                                "total": 0
+                                "count": 0
                             })
                     
                     # Clean up prepared statement
@@ -882,7 +885,7 @@ class Db:
                                 "status": 0,
                                 "message": success_msg,
                                 "data": [],
-                                "total": affected_rows
+                                "count": affected_rows
                             })
                             
                         except Exception as e:
@@ -891,7 +894,7 @@ class Db:
                                 "status": -1,
                                 "message": error_msg,
                                 "data": [],
-                                "total": 0
+                                "count": 0
                             })
                 
                 cur.close()
@@ -913,13 +916,13 @@ class Db:
             else:
                 error_msg = f"Unsupported database type: {self.database_type}"
                 logger.error(error_msg)
-                return [{"status": -1, "message": error_msg, "data": [], "total": 0}]
+                return [{"status": -1, "message": error_msg, "data": [], "count": 0}]
 
         except Exception as e:
             error_msg = f"execute_prepared method failed: {e}"
             logger.error(error_msg)
             logger.error(traceback.format_exc())
-            return [{"status": -1, "message": error_msg, "data": [], "total": 0}]
+            raise
 
     def execute(self, sql, values=None):
         """
@@ -928,7 +931,7 @@ class Db:
             sql: SQL statement to execute (for SQL databases) or operation dict (for MongoDB)
             values: values that need to be bound to query (supports both positional and named placeholders)
         Returns:
-            dictionary with status, message, data (empty), and total (affected rows)
+            dictionary with status, message, data (empty), and count (affected rows)
         """
         if values is None:
             values = []
@@ -974,7 +977,7 @@ class Db:
                     "status": 0,
                     "message": success_msg,
                     "data": [],
-                    "total": affected_rows
+                    "count": affected_rows
                 }
                 
             elif self.database_type in ['mongodb', 'mongodb+srv']:
@@ -983,13 +986,13 @@ class Db:
             else:
                 error_msg = f"Unsupported database type: {self.database_type}"
                 logger.error(error_msg)
-                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+                return {"status": -1, "message": error_msg, "data": [], "count": 0}
 
         except Exception as e:
             error_msg = f"Failed to execute statement: {e}"
             logger.error(error_msg)
             logger.error(traceback.format_exc())
-            return {"status": -1, "message": error_msg, "data": [], "total": 0}
+            raise
 
     def _execute_mongo_operation(self, operation):
         """
@@ -997,13 +1000,13 @@ class Db:
         Args:
             operation: Dictionary containing MongoDB operation details with method and args
         Returns:
-            Dictionary with status, message, data (empty), and total (affected count)
+            Dictionary with status, message, data (empty), and count (affected count)
         """
         try:
             if not isinstance(operation, dict):
                 error_msg = "MongoDB execute requires operation to be a dict"
                 logger.error(error_msg)
-                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+                raise Exception(error_msg)
             
             collection_name = operation.get("collection")
             method_name = operation.get("method")
@@ -1013,12 +1016,12 @@ class Db:
             if not collection_name:
                 error_msg = "MongoDB execute requires 'collection' in operation dict"
                 logger.error(error_msg)
-                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+                raise Exception(error_msg)
                 
             if not method_name:
                 error_msg = "MongoDB execute requires 'method' in operation dict"
                 logger.error(error_msg)
-                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+                raise Exception(error_msg)
             
             collection = self.conn[self.database_name][collection_name]
             
@@ -1026,7 +1029,7 @@ class Db:
             if not hasattr(collection, method_name):
                 error_msg = f"MongoDB collection does not have method: {method_name}"
                 logger.error(error_msg)
-                return {"status": -1, "message": error_msg, "data": [], "total": 0}
+                raise Exception(error_msg)
             
             method = getattr(collection, method_name)
             
@@ -1053,14 +1056,14 @@ class Db:
                 "status": 0,
                 "message": success_msg,
                 "data": [],
-                "total": affected_count
+                "count": affected_count
             }
             
         except Exception as e:
             error_msg = f"MongoDB execute failed: {e}"
             logger.error(error_msg)
             logger.error(traceback.format_exc())
-            return {"status": -1, "message": error_msg, "data": [], "total": 0}
+            raise Exception(error_msg)
 
     def update(self, table, data, where=None):
         """
@@ -1070,7 +1073,7 @@ class Db:
             data: JSON data with column-value pairs to update {"col1": "val1", "col2": "val2"}
             where: JSON where condition (optional)
         Returns:
-            dictionary with status, message, data (empty), and total (affected rows)
+            dictionary with status, message, data (empty), and count (affected rows)
         """
         try:
             # Handle empty update data
@@ -1080,7 +1083,7 @@ class Db:
                     'status': 0,
                     'message': 'No data to update',
                     'data': [],
-                    'total': 0
+                    'count': 0
                 }
             
             if self.database_type in ['mongodb', 'mongodb+srv']:
@@ -1196,7 +1199,7 @@ class Db:
             table: target table name
             where: JSON where condition (optional, but recommended to avoid deleting all records)
         Returns:
-            dictionary with status, message, data (empty), and total (affected rows)
+            dictionary with status, message, data (empty), and count (affected rows)
         """
         try:
             if self.database_type in ['mongodb', 'mongodb+srv']:
@@ -1259,7 +1262,7 @@ class Db:
                   Can be a single record (dict) or list of records (list of dicts)
             key_columns: list of column names that define uniqueness for matching records
         Returns:
-            dictionary with status, message, data (empty), and total (affected rows)
+            dictionary with status, message, data (empty), and count (affected rows)
         """
         try:
             # Validate input parameters
@@ -1269,7 +1272,7 @@ class Db:
                     'status': 0,
                     'message': 'No data to merge',
                     'data': [],
-                    'total': 0
+                    'count': 0
                 }
             
             if not key_columns:
@@ -1315,7 +1318,7 @@ class Db:
                 try:
                     result = self._single_merge(table, record, key_columns)
                     if result['status'] == 0:
-                        total_affected += result['total']
+                        total_affected += result['count']
                         messages.append(f"Record {i+1}: {result['message']}")
                     else:
                         messages.append(f"Record {i+1} failed: {result['message']}")
@@ -1330,7 +1333,7 @@ class Db:
                 "status": 0,
                 "message": success_msg,
                 "data": [],
-                "total": total_affected
+                "count": total_affected
             }
             
         except Exception as e:

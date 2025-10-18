@@ -128,12 +128,12 @@ def setup_test_data(db, db_key):
             result = db.insert("test_users", test_records)
             if result['status'] != 0:
                 raise Exception(f"Failed to insert test records: {result.get('message', 'Unknown error')}")
-            print(f"SUCCESS: Inserted {result['total']} test records for delete testing")
+            print(f"SUCCESS: Inserted {result['count']} test records for delete testing")
             
             # Verify records were inserted
             count_result = db.query("SELECT COUNT(*) as total FROM test_users WHERE email LIKE '%@deletetest.com'")
             if count_result["data"]:
-                total_records = count_result["data"][0]["total"]
+                total_records = count_result["count"]
                 print(f"SUCCESS: {total_records} test records available for delete testing")
                 return total_records
             else:
@@ -194,7 +194,7 @@ def setup_test_data(db, db_key):
             result = db.insert("test_users", test_docs)
             if result['status'] != 0:
                 raise Exception(f"Failed to insert test documents: {result.get('message', 'Unknown error')}")
-            print(f"SUCCESS: Inserted {result['total']} test documents for delete testing")
+            print(f"SUCCESS: Inserted {result['count']} test documents for delete testing")
             return len(test_docs)
             
     except Exception as e:
@@ -236,12 +236,13 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             
             if result["status"] != 0:
                 raise Exception(f"Simple where delete failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            if result["total"] < 1:
-                raise Exception(f"Simple where delete should affect at least 1 row, but affected {result['total']}")
+            if result["count"] < 1:
+                raise Exception(f"Simple where delete should affect at least 1 row, but affected {result['count']}")
             
             # Verify deletion
             verify_result = db.query("SELECT COUNT(*) as total FROM test_users WHERE status = 'inactive' AND email LIKE '%@deletetest.com'")
-            remaining_inactive = verify_result["data"][0]["total"] if verify_result["data"] else 0
+            remaining_inactive = verify_result['data'][0]['total'] if verify_result["data"] else 0
+            print(verify_result)
             print(f"Verification: {remaining_inactive} inactive records remain (should be 0)")
             
             if remaining_inactive != 0:
@@ -266,7 +267,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             
             # Verify deletion
             verify_result = db.query("SELECT COUNT(*) as total FROM test_users WHERE age > 30 AND email LIKE '%@deletetest.com'")
-            remaining_older = verify_result["data"][0]["total"] if verify_result["data"] else 0
+            remaining_older = verify_result['data'][0]['total'] if verify_result["data"] else 0
             print(f"Verification: {remaining_older} records with age > 30 remain (should be 0)")
             
             if remaining_older != 0:
@@ -328,7 +329,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             print("\n--- Test 5: Delete Remaining Test Records ---")
             # Count remaining test records first
             count_result = db.query("SELECT COUNT(*) as total FROM test_users WHERE email LIKE '%@deletetest.com'")
-            remaining_count = count_result["data"][0]["total"] if count_result["data"] else 0
+            remaining_count = count_result["count"] if count_result["data"] else 0
             print(f"Records remaining before final cleanup: {remaining_count}")
             
             if remaining_count > 0:
@@ -356,8 +357,8 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             
             if result["status"] != 0:
                 raise Exception(f"Delete with no matches failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            if result["total"] != 0:
-                raise Exception(f"Delete with no matches should affect 0 rows, but affected {result['total']}")
+            if result["count"] != 0:
+                raise Exception(f"Delete with no matches should affect 0 rows, but affected {result['count']}")
             
             print("SUCCESS: Test 6 passed - Delete from empty result set")
         except Exception as e:
@@ -405,7 +406,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         try:
             print("\n--- Final Verification ---")
             final_count_result = db.query("SELECT COUNT(*) as total FROM test_users WHERE email LIKE '%@deletetest.com'")
-            final_count = final_count_result["data"][0]["total"] if final_count_result["data"] else 0
+            final_count = final_count_result['data'][0]['total'] if final_count_result["data"] else 0
             print(f"Final test record count: {final_count} (should be 0)")
             
             if final_count != 0:
@@ -464,8 +465,8 @@ def test_mongodb_database(db_key):
             
             if result["status"] != 0:
                 raise Exception(f"Simple where delete failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            if result["total"] < 1:
-                raise Exception(f"Simple where delete should affect at least 1 document, but affected {result['total']}")
+            if result["count"] < 1:
+                raise Exception(f"Simple where delete should affect at least 1 document, but affected {result['count']}")
             
             # Verify deletion
             collection = client["conn"][db.database_name]["test_users"]
@@ -565,8 +566,8 @@ def test_mongodb_database(db_key):
             
             if result["status"] != 0:
                 raise Exception(f"Delete with no matches failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            if result["total"] != 0:
-                raise Exception(f"Delete with no matches should affect 0 documents, but affected {result['total']}")
+            if result["count"] != 0:
+                raise Exception(f"Delete with no matches should affect 0 documents, but affected {result['count']}")
             
             print("SUCCESS: Test 5 passed - Delete from empty result set")
         except Exception as e:
@@ -660,7 +661,7 @@ def test_error_handling():
             if result["status"] != 0:
                 print(f"SUCCESS: Correctly handled invalid where condition: {result['message']}")
             else:
-                print(f"INFO: Invalid where condition was processed (affected {result['total']} rows)")
+                print(f"INFO: Invalid where condition was processed (affected {result['count']} rows)")
                 
         except Exception as e:
             print(f"SUCCESS: Correctly caught invalid where condition error: {e}")
