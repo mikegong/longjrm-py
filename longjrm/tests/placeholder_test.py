@@ -136,7 +136,7 @@ def test_named_placeholders_mysql_postgres(db_key, backend):
                 {"name": "Test User", "age": 35, "email": "testuser@example.com"}
             )
             assert result["status"] == 0
-            assert result["total"] == 1
+            assert result["count"] == 1
             print("SUCCESS: INSERT with named placeholders works")
             
             # Select back the data
@@ -171,7 +171,7 @@ def test_named_placeholders_mysql_postgres(db_key, backend):
             assert len(results) == 3
             for result in results:
                 assert result["status"] == 0
-                assert result["total"] == 1
+                assert result["count"] == 1
             
             print("SUCCESS: Prepared execute with named placeholders works")
             

@@ -80,7 +80,7 @@ def setup_test_data(db, db_key):
             
             # Clean up existing test data
             cleanup_result = db.execute("DELETE FROM test_users WHERE email LIKE '%@updatetest.com'")
-            print(f"SUCCESS: Cleaned up {cleanup_result['total']} existing test records")
+            print(f"SUCCESS: Cleaned up {cleanup_result['count']} existing test records")
             
             # Insert test data for updates
             test_records = [
@@ -198,7 +198,7 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         result = db.update("test_users", update_data, where_condition)
         print(f"Single update result: {result}")
         assert result["status"] == 0, "Single update should succeed"
-        assert result["total"] >= 1, "Single update should affect at least 1 row"
+        assert result["count"] >= 1, "Single update should affect at least 1 row"
         
         # Verify the update worked
         verify_result = db.query("SELECT * FROM test_users WHERE email = %s", ["john@updatetest.com"])
@@ -219,7 +219,7 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         result = db.update("test_users", bulk_update_data, bulk_where_condition)
         print(f"Bulk update result: {result}")
         assert result["status"] == 0, "Bulk update should succeed"
-        assert result["total"] >= 1, "Bulk update should affect at least 1 row"
+        assert result["count"] >= 1, "Bulk update should affect at least 1 row"
         
         # Test 3: Update with NULL values
         print("\n--- Test 3: Update with NULL Values ---")
@@ -232,7 +232,7 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         result = db.update("test_users", null_update_data, null_where_condition)
         print(f"NULL update result: {result}")
         assert result["status"] == 0, "NULL update should succeed"
-        assert result["total"] >= 1, "NULL update should affect at least 1 row"
+        assert result["count"] >= 1, "NULL update should affect at least 1 row"
         
         # Test 4: Update with CURRENT timestamp
         print("\n--- Test 4: Update with CURRENT Keywords ---")
@@ -245,7 +245,7 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         result = db.update("test_users", current_update_data, current_where_condition)
         print(f"CURRENT keyword update result: {result}")
         assert result["status"] == 0, "CURRENT keyword update should succeed"
-        assert result["total"] >= 1, "CURRENT keyword update should affect at least 1 row"
+        assert result["count"] >= 1, "CURRENT keyword update should affect at least 1 row"
         
         # Test 5: Update with complex WHERE conditions
         print("\n--- Test 5: Complex WHERE Conditions ---")
@@ -270,7 +270,7 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         result = db.update("test_users", global_update_data)
         print(f"Global update result: {result}")
         assert result["status"] == 0, "Global update should succeed"
-        assert result["total"] >= 3, "Global update should affect all test records"
+        assert result["count"] >= 3, "Global update should affect all test records"
         
         # Test 7: Update non-existent record
         print("\n--- Test 7: Update Non-existent Record ---")
@@ -282,14 +282,14 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         result = db.update("test_users", nonexistent_update_data, nonexistent_where_condition)
         print(f"Non-existent update result: {result}")
         assert result["status"] == 0, "Non-existent update should succeed (but affect 0 rows)"
-        assert result["total"] == 0, "Non-existent update should affect 0 rows"
+        assert result["count"] == 0, "Non-existent update should affect 0 rows"
         
         print("\nSUCCESS: All SQL update tests completed successfully")
         
         # Clean up test data
         try:
             cleanup_result = db.execute("DELETE FROM test_users WHERE email LIKE '%@updatetest.com'")
-            print(f"SUCCESS: Cleaned up {cleanup_result['total']} test records")
+            print(f"SUCCESS: Cleaned up {cleanup_result['count']} test records")
         except Exception as e:
             print(f"WARNING:  Could not clean up test data: {e}")
     
@@ -326,7 +326,7 @@ def test_mongodb_database_update(db_key):
         result = db.update("test_users", update_data, where_condition)
         print(f"Single update result: {result}")
         assert result["status"] == 0, "Single update should succeed"
-        assert result["total"] >= 1, "Single update should affect at least 1 document"
+        assert result["count"] >= 1, "Single update should affect at least 1 document"
         
         # Test 2: Bulk update with filter
         print("\n--- Test 2: Bulk Update with Filter ---")
@@ -381,7 +381,7 @@ def test_mongodb_database_update(db_key):
         result = db.update("test_users", global_update_data)
         print(f"Global update result: {result}")
         assert result["status"] == 0, "Global update should succeed"
-        assert result["total"] >= 3, "Global update should affect all test documents"
+        assert result["count"] >= 3, "Global update should affect all test documents"
         
         # Test 6: Update non-existent document
         print("\n--- Test 6: Update Non-existent Document ---")
@@ -393,7 +393,7 @@ def test_mongodb_database_update(db_key):
         result = db.update("test_users", nonexistent_update_data, nonexistent_where_condition)
         print(f"Non-existent update result: {result}")
         assert result["status"] == 0, "Non-existent update should succeed (but affect 0 documents)"
-        assert result["total"] == 0, "Non-existent update should affect 0 documents"
+        assert result["count"] == 0, "Non-existent update should affect 0 documents"
         
         print("\nSUCCESS: All MongoDB update tests completed successfully")
         

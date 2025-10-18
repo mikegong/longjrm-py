@@ -151,9 +151,12 @@ def setup_test_data(db, database_type):
     
     try:
         result = db.insert("test_users", test_records)
+        print(f"result: {result}")
+        result = db.select("test_users", ["id","name"])
+        print(f"result: {result}")
         assert result["status"] == 0, "Test data insertion should succeed"
-        assert result["total"] >= 5, "Should insert all 5 test records"
-        print(f"SUCCESS: Inserted {result['total']} test records")
+        assert result["count"] >= 5, "Should insert all 5 test records"
+        print(f"SUCCESS: Inserted {result['count']} test records")
         return True
     except Exception as e:
         print(f"ERROR: Could not insert test data: {e}")
@@ -163,7 +166,7 @@ def cleanup_test_data(db):
     """Clean up test data after tests"""
     try:
         result = db.execute("DELETE FROM test_users WHERE email LIKE '%@selecttest.com'")
-        print(f"SUCCESS: Cleaned up {result['total']} test records")
+        print(f"SUCCESS: Cleaned up {result['count']} test records")
     except Exception as e:
         print(f"WARNING: Could not clean up test data: {e}")
 
@@ -417,8 +420,8 @@ def test_mongodb_database(db_key):
         result = db.insert("test_users", test_documents)
         print(f"MongoDB insert result: {result}")
         assert result["status"] == 0, "Test data insertion should succeed"
-        assert result["total"] == 5, f"Should insert all 5 test documents, got {result['total']}"
-        print(f"SUCCESS: Inserted {result['total']} test documents")
+        assert result["count"] == 5, f"Should insert all 5 test documents, got {result['count']}"
+        print(f"SUCCESS: Inserted {result['count']} test documents")
         
         # Test 1: Basic select all documents
         print("\n--- Test 1: Select All Documents ---")

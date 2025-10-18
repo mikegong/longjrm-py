@@ -35,8 +35,8 @@ with pools[db_key].client() as client:
         result = db.select(table='Listing', where={'guestCount': 4, 'roomCount': 2})
         print(result)
     else:
-        result1 = db.select(table='sample', columns=['*'], where={'c1': 'a'})
-        result2 = db.select(table='sample', columns=['*'], where={'c2': 3})
+        result1 = db.select(table='sample', columns=['*'], where={'status': 'active'})
+        result2 = db.select(table='sample', columns=['*'], where={'status': 'inactive'})
         print(result1)
         print(result2)
     
