@@ -17,10 +17,10 @@ def _unwrap_connection(conn):
     """
     Unwrap pooling library wrappers to get the actual DB-API connection.
 
-    Handles multiple levels of wrapping from DBUtils and SQLAlchemy:
-    - DBUtils: PooledDedicatedDBConnection -> SteadyDBConnection -> actual connection
-    - DBUtils: SharedDBConnection -> SteadyDBConnection -> actual connection
-    - SQLAlchemy: ConnectionFairy -> actual connection
+    Known nesting scenarios:
+    1. DBUtils PooledDB: PooledDedicatedDBConnection._con -> SteadyDBConnection._con -> actual
+    2. DBUtils SharedDB: SharedDBConnection.con -> SteadyDBConnection._con -> actual
+    3. SQLAlchemy: ConnectionFairy.dbapi_connection -> actual
 
     Args:
         conn: A connection object that may be wrapped by pooling libraries
@@ -29,18 +29,44 @@ def _unwrap_connection(conn):
         The actual DB-API connection object
     """
     actual_conn = conn
+    conn_type = type(actual_conn).__name__
+    conn_module = type(actual_conn).__module__
+    logger.debug(f"Unwrapping connection: {actual_conn}")
+    
+    # Scenario 1: DBUtils PooledDB - PooledDedicatedDBConnection
+    if 'dbutils' in conn_module.lower() and conn_type == 'PooledDedicatedDBConnection':
+        if hasattr(actual_conn, '_con'):
+            actual_conn = actual_conn._con  # -> SteadyDBConnection
+            # Continue to unwrap SteadyDBConnection
+            if hasattr(actual_conn, '_con'):
+                logger.debug(f"Unwrapping SharedDBConnection: {actual_conn}")
+                actual_conn = actual_conn._con  # -> actual connection
+        return actual_conn
 
-    # Unwrap DBUtils wrappers (may have multiple levels)
-    while hasattr(actual_conn, 'con') or hasattr(actual_conn, '_con'):
-        if hasattr(actual_conn, 'con'):  # SharedDBConnection
-            actual_conn = actual_conn.con
-        elif hasattr(actual_conn, '_con'):  # PooledDedicatedDBConnection or SteadyDBConnection
-            actual_conn = actual_conn._con
+    # Scenario 2: DBUtils SharedDB - SharedDBConnection
+    if 'dbutils' in conn_module.lower() and conn_type == 'SharedDBConnection':
+        if hasattr(actual_conn, 'con'):
+            actual_conn = actual_conn.con  # -> SteadyDBConnection
+            # Continue to unwrap SteadyDBConnection
+            if hasattr(actual_conn, '_con'):
+                actual_conn = actual_conn._con  # -> actual connection
+        return actual_conn
 
-    # Handle SQLAlchemy wrapper
-    if hasattr(actual_conn, 'dbapi_connection'):  # ConnectionFairy
-        actual_conn = actual_conn.dbapi_connection
+    # Scenario 3: Direct SteadyDBConnection (if pool returns it directly)
+    if 'dbutils' in conn_module.lower() and conn_type == 'SteadyDBConnection':
+        if hasattr(actual_conn, '_con'):
+            actual_conn = actual_conn._con  # -> actual connection
+        return actual_conn
 
+    # Scenario 4: SQLAlchemy ConnectionFairy
+    if 'sqlalchemy' in conn_module.lower():
+        if hasattr(actual_conn, 'dbapi_connection'):
+            actual_conn = actual_conn.dbapi_connection  # -> actual connection
+        elif hasattr(actual_conn, 'connection'):
+            actual_conn = actual_conn.connection  # -> actual connection
+        return actual_conn
+
+    # No wrapper detected, return as-is (already actual connection)
     return actual_conn
 
 
