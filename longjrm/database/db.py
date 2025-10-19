@@ -441,8 +441,7 @@ class Db:
             else:
                 raise ValueError(f"Unsupported database type: {self.database_type}")
 
-        except Exception as e:
-            logger.error(f"query method failed: {e}")
+        except Exception:
             raise
 
     def _execute_mongo_query(self, sql, collection_name):
@@ -988,10 +987,7 @@ class Db:
                 logger.error(error_msg)
                 return {"status": -1, "message": error_msg, "data": [], "count": 0}
 
-        except Exception as e:
-            error_msg = f"Failed to execute statement: {e}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
+        except Exception:
             raise
 
     def _execute_mongo_operation(self, operation):
