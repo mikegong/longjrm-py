@@ -152,7 +152,9 @@ class Db:
         arr_cond = []
         arr_values = []
 
-        if isinstance(value, str):
+        if value is None:
+            arr_cond.append(f"{column} is null")
+        elif isinstance(value, str):
             clean_value = value.replace("''", "'")
             if Db.check_current_keyword(clean_value):
                 # CURRENT keyword cannot be put in placeholder
