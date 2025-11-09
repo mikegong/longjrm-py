@@ -673,13 +673,13 @@ class Db:
         if isinstance(value, dict):
             return json.dumps(value, ensure_ascii=False)
         elif isinstance(value, list):
-            if len(value) > 0:
-                if isinstance(value[0], dict):
-                    return json.dumps(value, ensure_ascii=False)
-                else:
-                    return '|'.join(str(item) for item in value)
+            if len(value) > 0 and isinstance(value[0], dict):
+                # Only convert list of dicts to JSON
+                return json.dumps(value, ensure_ascii=False)
             else:
-                return '[]'
+                # For simple lists, pass as-is to database driver
+                # The driver will handle conversion (e.g., psycopg2 -> PostgreSQL arrays)
+                return value
         elif isinstance(value, datetime.date):
             return str(value)
         elif isinstance(value, datetime.datetime):
@@ -1170,13 +1170,13 @@ class Db:
         elif isinstance(value, dict):
             return json.dumps(value, ensure_ascii=False)
         elif isinstance(value, list):
-            if len(value) > 0:
-                if isinstance(value[0], dict):
-                    return json.dumps(value, ensure_ascii=False)
-                else:
-                    return '|'.join(str(item) for item in value)
+            if len(value) > 0 and isinstance(value[0], dict):
+                # Only convert list of dicts to JSON
+                return json.dumps(value, ensure_ascii=False)
             else:
-                return '[]'
+                # For simple lists, pass as-is to database driver
+                # The driver will handle conversion (e.g., psycopg2 -> PostgreSQL arrays)
+                return value
         elif isinstance(value, datetime.date):
             return str(value)
         elif isinstance(value, datetime.datetime):
