@@ -30,7 +30,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 The library supports multiple database types through a unified interface:
 - **MySQL** (via PyMySQL) 
 - **PostgreSQL** (via psycopg2)
-- **MongoDB** (via pymongo)
 
 **Extensible Architecture**: Easily supports additional databases implementing Python DB-API 2.0 (PEP 249) including SQLite, Oracle, SQL Server, IBM DB2, Firebird, and others. Database driver mappings are defined in `longjrm/connection/driver_map.json`.
 
@@ -211,23 +210,6 @@ The library supports three where condition formats:
 # placeholder: "Y" = use parameterized query, "N" = inline value
 ```
 
-### MongoDB Support
-
-MongoDB operations use the same API with native MongoDB query syntax:
-
-```python
-with pool.client() as client:
-    db = Db(client)
-    
-    # MongoDB where conditions use native operators
-    where = {"age": {"$gt": 25}, "status": {"$in": ["active", "pending"]}}
-    result = db.select("users", where=where)
-
-    # MongoDB delete with regex
-    where = {"email": {"$regex": "@company.com$"}}
-    result = db.delete("users", where)
-```
-
 ### Special Features
 
 #### Placeholder Support
@@ -326,15 +308,6 @@ python longjrm/tests/placeholder_test.py # Test placeholder handling
         "password": "secure_password",
         "port": 5432,
         "database": "app_production"
-    },
-    "mongodb-analytics": {
-        "type": "mongodb",
-        "host": "mongo.company.com",
-        "port": 27017,
-        "database": "analytics",
-        "auth_database": "admin",
-        "username": "analyst",
-        "password": "mongo_password"
     }
 }
 ```
@@ -380,9 +353,9 @@ longjrm/
 
 Each database operation requires a "client" object containing:
 - `conn`: Database connection/pool object
-- `database_type`: Type identifier (mysql, postgres, mongodb, etc.)  
+- `database_type`: Type identifier (mysql, postgres, etc.)  
 - `database_name`: Logical database name
-- `db_lib`: Python database driver such as psycopg2, pymysql, pymongo
+- `db_lib`: Python database driver such as psycopg2, pymysql
 
 ## Package Information
 
@@ -395,7 +368,6 @@ Each database operation requires a "client" object containing:
 **Database Drivers (installed based on database needs):**
 - PyMySQL ~= 1.1.0 (MySQL support)
 - psycopg2-binary ~= 2.9.0 (PostgreSQL support)
-- pymongo ~= 4.6.0 (MongoDB support)
 
 **Connection Pooling:**
 - SQLAlchemy ~= 2.0.0 (Advanced connection pooling backend)
@@ -413,7 +385,6 @@ Each database operation requires a "client" object containing:
 - **Individual Test Isolation**: Each test wrapped in try-catch blocks
 - **Comprehensive Validation**: Status codes, row counts, and verification queries
 - **Multi-Backend Testing**: Tests run against DBUTILS and SQLAlchemy backends
-- **Cross-Database Compatibility**: Same test logic for SQL and MongoDB
 
 ### Error Handling
 - Use appropriate exception types with meaningful error messages
@@ -440,8 +411,8 @@ SQLite, Oracle, SQL Server, IBM DB2, Firebird, and others following DB-API 2.0 s
 
 ## Performance Optimization
 
-- **Connection Pooling**: DBUtils-based pooling for SQL, native MongoDB connections
-- **Prepared Statements**: Available via `execute_prepared()` and `query_prepared()` methods
+- **Connection Pooling**: DBUtils-based pooling for SQL databases
+- **Prepared Statements**: Available internally via `_execute_prepared()` and `_query_prepared()` methods
 - **Bulk Operations**: Optimized bulk insert support for large datasets
 - **Memory Management**: Efficient handling in long-running applications
 

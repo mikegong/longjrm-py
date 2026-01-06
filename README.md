@@ -10,7 +10,7 @@ The core philosophy is to eliminate data models inside applications and work dir
 
 ## Key Features
 
-- **Multi-Database Support**: Unified interface for MySQL, PostgreSQL, MongoDB, and more databases that support DB-API 2.0
+- **Multi-Database Support**: Unified interface for MySQL, PostgreSQL, and more databases that support DB-API 2.0
 - **JSON-Based Operations**: Direct JSON input/output for database operations
 - **Connection Pooling**: Efficient connection management with DBUtils-based pooling and SQLAlchemy pooling
 - **Configuration Management**: Flexible configuration via JSON files or environment variables
@@ -36,7 +36,6 @@ The core philosophy is to eliminate data models inside applications and work dir
 
 - **MySQL** (via PyMySQL)
 - **PostgreSQL** (via psycopg2)
-- **MongoDB** (via pymongo)
 
 **Extensible Database Support**: The library is designed to easily support additional databases that implement the Python DB-API 2.0 specification. New database types can be added by updating the driver mappings and implementing the appropriate connection logic.
 
@@ -87,7 +86,7 @@ python setup.py sdist bdist_wheel
 
 ### Dependency Overview
 
-- **Core dependencies**: PyMySQL, psycopg2-binary, pymongo, DBUtils (always installed)
+- **Core dependencies**: PyMySQL, psycopg2-binary, DBUtils (always installed)
 - **Optional dependencies**: 
   - `sqlalchemy`: SQLAlchemy ~= 2.0.0 for advanced connection pooling features
 
@@ -151,12 +150,6 @@ Create database configuration files in JSON format:
         "user": "username",
         "password": "password",
         "port": 5432,
-        "database": "test"
-    },
-    "mongodb-test": {
-        "type": "mongodb",
-        "host": "localhost",
-        "port": 27017,
         "database": "test"
     }
 }
@@ -252,9 +245,9 @@ finally:
 
 Each database operation requires a "client" object containing:
 - `conn`: Database connection object
-- `database_type`: Type identifier (mysql, postgres, mongodb, etc.)
+- `database_type`: Type identifier (mysql, postgres, etc.)
 - `database_name`: Logical database name
-- `db_lib`: Python database driver such as psycopg2, pymysql, pymongo
+- `db_lib`: Python database driver such as psycopg2, pymysql
 
 ## Testing
 
@@ -288,12 +281,6 @@ Test scripts expect database configurations in `test_config/dbinfos.json`. Copy 
         "password": "password",
         "port": 3306,
         "database": "test"
-    },
-    "mongodb-test": {
-        "type": "mongodb",
-        "host": "localhost",
-        "port": 27017,
-        "database": "test"
     }
 }
 ```
@@ -320,7 +307,6 @@ The test suite provides comprehensive coverage of all database operations:
 - **`insert_test.py`**: Comprehensive insert functionality testing
   - Single record insertion
   - Bulk record insertion
-  - MongoDB document operations
   - Error handling and edge cases
   - CURRENT keyword support
   - PostgreSQL RETURNING clause support
@@ -366,7 +352,6 @@ The library follows Python logging best practices:
 ### Database Drivers (installed based on your database needs)
 - PyMySQL ~= 1.1.0 (MySQL support)
 - psycopg2-binary ~= 2.9.0 (PostgreSQL support)
-- pymongo ~= 4.6.0 (MongoDB support)
 
 ### Connection Pooling
 - SQLAlchemy ~= 2.0.0 (Advanced connection pooling backend)

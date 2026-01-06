@@ -11,7 +11,7 @@ LongJRM provides a sophisticated connection management system that abstracts dat
 - **`DatabaseConnection`**: Low-level database connection abstraction
 - **`Pool`**: High-level connection pooling with multiple backends
 - **`DriverRegistry`**: Dynamic driver loading and SQLAlchemy dialect mapping
-- **Connection Backends**: SQLAlchemy, DBUtils, and MongoDB-specific implementations
+- **Connection Backends**: SQLAlchemy and DBUtils implementations
 
 ### Driver Support
 
@@ -23,7 +23,6 @@ The connection system supports multiple database types through a driver registry
 | MySQL | `pymysql` | `mysql` | `pymysql` |
 | MariaDB | `pymysql` | `mysql` | `pymysql` |
 | SQLite | `sqlite3` | `sqlite` | (built-in) |
-| MongoDB | `pymongo` | (NoSQL - no dialect) | (NoSQL - no driver) |
 
 ## Direct Database Connections
 
@@ -108,25 +107,6 @@ db_config = DatabaseConfig(
 )
 ```
 
-**MongoDB:**
-```python
-# MongoDB Atlas (recommended)
-db_config = DatabaseConfig(
-    type="mongodb+srv",
-    dsn="mongodb+srv://user:pass@cluster.mongodb.net/database"
-)
-
-# Traditional MongoDB
-db_config = DatabaseConfig(
-    type="mongodb",
-    host="mongo.example.com",
-    port=27017,
-    user="mongo_user",
-    password="mongo_password",
-    database="app_database"
-)
-```
-
 ### Connection Features
 
 #### Automatic Driver Loading
@@ -185,11 +165,6 @@ LongJRM provides a unified `Pool` interface with multiple backend implementation
    - Lightweight, high-performance pooling
    - Lower memory overhead
    - Simple connection management
-
-3. **MongoDB Pool** (`PoolBackend.MONGODB`)
-   - Native MongoDB connection pooling
-   - Automatic replica set handling
-   - Built-in connection recovery
 
 ### Basic Pool Usage
 
@@ -296,16 +271,10 @@ with pool.client() as client:
     # Access the raw connection
     raw_connection = client["conn"]
     
-    # Database type for conditional logic
-    if client["database_type"] == "mongodb":
-        # MongoDB-specific operations
-        collection = client["conn"][client["database_name"]]["users"]
-        result = collection.find_one({"_id": "user123"})
-    else:
-        # SQL database operations
-        cursor = client["conn"].cursor()
-        cursor.execute("SELECT * FROM users WHERE id = %s", ("user123",))
-        result = cursor.fetchone()
+    # SQL database operations
+    cursor = client["conn"].cursor()
+    cursor.execute("SELECT * FROM users WHERE id = %s", ("user123",))
+    result = cursor.fetchone()
 ```
 
 ## Production Patterns
@@ -330,10 +299,7 @@ class DatabaseManager:
             db_config = require_db(db_name)
             
             # Choose backend based on database type
-            if db_config.type in ['mongodb', 'mongodb+srv']:
-                backend = PoolBackend.MONGODB
-            else:
-                backend = PoolBackend.SQLALCHEMY  # or DBUTILS for lighter weight
+            backend = PoolBackend.SQLALCHEMY  # or DBUTILS for lighter weight
                 
             self.pools[db_name] = Pool.from_config(db_config, backend)
             
@@ -484,51 +450,6 @@ db_config = DatabaseConfig(
 )
 ```
 
-### MongoDB
-
-#### Connection Configuration
-
-```python
-# MongoDB connection with replica set
-db_config = DatabaseConfig(
-    type="mongodb",
-    dsn="mongodb://user:pass@host1:27017,host2:27017,host3:27017/database?replicaSet=rs0&readPreference=secondaryPreferred"
-)
-
-# MongoDB Atlas
-db_config = DatabaseConfig(
-    type="mongodb+srv",
-    dsn="mongodb+srv://user:pass@cluster.mongodb.net/database?retryWrites=true&w=majority"
-)
-```
-
-#### MongoDB-Specific Usage
-
-```python
-# MongoDB connection usage
-pool = Pool.from_config(db_config, PoolBackend.MONGODB)
-
-with pool.client() as client:
-    mongo_client = client["conn"]
-    database = mongo_client[client["database_name"]]
-    
-    # Collection operations
-    users = database["users"]
-    
-    # Insert document
-    result = users.insert_one({"name": "John", "email": "john@example.com"})
-    
-    # Find documents
-    user = users.find_one({"_id": result.inserted_id})
-    
-    # Aggregation pipeline
-    pipeline = [
-        {"$match": {"status": "active"}},
-        {"$group": {"_id": "$department", "count": {"$sum": 1}}}
-    ]
-    results = list(users.aggregate(pipeline))
-```
-
 ## Error Handling
 
 ### Connection Errors
@@ -597,27 +518,17 @@ def test_real_database_connection():
     # Test each configured database
     for db_name in config.databases().keys():
         db_config = require_db(db_name)
-        
-        if db_config.type in ['mongodb', 'mongodb+srv']:
-            backend = PoolBackend.MONGODB
-        else:
-            backend = PoolBackend.SQLALCHEMY
+        backend = PoolBackend.SQLALCHEMY
             
         pool = Pool.from_config(db_config, backend)
         
         try:
             with pool.client() as client:
-                if db_config.type in ['mongodb', 'mongodb+srv']:
-                    # Test MongoDB connection
-                    mongo_client = client["conn"]
-                    result = mongo_client.admin.command('ping')
-                    assert result['ok'] == 1
-                else:
-                    # Test SQL connection
-                    cursor = client["conn"].cursor()
-                    cursor.execute("SELECT 1")
-                    result = cursor.fetchone()
-                    assert result[0] == 1
+                # Test SQL connection
+                cursor = client["conn"].cursor()
+                cursor.execute("SELECT 1")
+                result = cursor.fetchone()
+                assert result[0] == 1
                 
         finally:
             pool.dispose()
@@ -628,7 +539,7 @@ def test_real_database_connection():
 ### Common Issues
 
 1. **"No module named" errors**:
-   - Install required database drivers: `pip install psycopg2-binary pymysql pymongo`
+   - Install required database drivers: `pip install psycopg2-binary pymysql`
    - Check driver mapping in `driver_map.json`
 
 2. **Connection timeout errors**:

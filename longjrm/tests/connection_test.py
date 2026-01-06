@@ -12,9 +12,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-db_key = "postgres-test"
-#db_key = "mysql-test"
-#db_key = "mongodb-test"
+#db_key = "postgres-test"
+db_key = "mysql-test"
+
 
 cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
 # inject the configuration into the runtime
@@ -79,27 +79,6 @@ def setup_sql_sample_table(conn, database_type):
         logger.info(f"✓ Successfully created sample table with {len(sample_data)} records")
 
 
-def setup_mongodb_sample_collection(conn, database_name):
-    """Create and populate sample collection for MongoDB."""
-    db = conn[database_name]
-    collection_name = 'sample'
-
-    # Drop collection if exists
-    logger.info(f"Dropping {collection_name} collection if it exists...")
-    db[collection_name].drop()
-
-    # Insert sample documents
-    logger.info("Inserting sample documents...")
-    sample_data = [
-        {"name": "Alice Johnson", "email": "alice@example.com", "age": 28, "status": "active"},
-        {"name": "Bob Smith", "email": "bob@example.com", "age": 35, "status": "active"},
-        {"name": "Charlie Brown", "email": "charlie@example.com", "age": 42, "status": "inactive"},
-        {"name": "Diana Prince", "email": "diana@example.com", "age": 30, "status": "active"},
-        {"name": "Eve Wilson", "email": "eve@example.com", "age": 25, "status": "pending"}
-    ]
-
-    result = db[collection_name].insert_many(sample_data)
-    logger.info(f"✓ Successfully created {collection_name} collection with {len(result.inserted_ids)} documents")
 
 
 try:
@@ -141,36 +120,6 @@ try:
         logger.info("✓ All SQL tests completed successfully!")
         logger.info(f"{'='*60}\n")
 
-    else:
-        # MongoDB
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Testing MongoDB Connection")
-        logger.info(f"{'='*60}\n")
-
-        # Setup sample collection
-        setup_mongodb_sample_collection(conn, db_cfg.database)
-
-        # Test: Read all documents
-        logger.info("\nTest 1: Reading all documents from sample collection...")
-        db = conn[db_cfg.database]
-        results = list(db['sample'].find())
-        logger.info(f"Found {len(results)} documents:")
-        for doc in results:
-            print(f"  {doc}")
-
-        # Test: Read single document
-        logger.info("\nTest 2: Reading single active user...")
-        result = db['sample'].find_one({'status': 'active'})
-        logger.info(f"Result: {result}")
-
-        # Test: Count documents
-        logger.info("\nTest 3: Counting active users...")
-        count = db['sample'].count_documents({'status': 'active'})
-        logger.info(f"Active users: {count}")
-
-        logger.info(f"\n{'='*60}")
-        logger.info("✓ All MongoDB tests completed successfully!")
-        logger.info(f"{'='*60}\n")
 
 except Exception as e:
     logger.error(f"\n✗ Test failed with error: {e}")

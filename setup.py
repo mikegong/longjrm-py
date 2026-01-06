@@ -3,8 +3,8 @@ from setuptools import setup, find_packages
 # Core dependencies (always required)
 install_requires = [
     "PyMySQL>=1.1.0,<2.0.0",
+    "cryptography>=41.0.0",
     "psycopg2-binary>=2.9.0,<3.0.0", 
-    "pymongo>=4.6.0,<5.0.0",
     "DBUtils>=3.0.3,<4.0.0",
 ]
 
@@ -16,7 +16,7 @@ extras_require = {
 
 setup(
     name="longjrm",
-    version="0.0.2",
+    version="0.1.0",
     author="Mike Gong at LONGINFO",
     description="JRM Library for Python",
     packages=find_packages(),

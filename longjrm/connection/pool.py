@@ -7,7 +7,7 @@ from longjrm.config.config import DatabaseConfig
 from longjrm.config.runtime import get_config
 from longjrm.connection.dbconn import DatabaseConnection, set_autocommit, set_isolation_level
 from longjrm.connection.driver_registry import load_driver_map, sa_minimal_url
-from longjrm.database.db import Db
+from longjrm.database import get_db
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,6 @@ class TransactionContext:
 class PoolBackend(str, Enum):
     SQLALCHEMY = "sqlalchemy"
     DBUTILS = "dbutils"
-    MONGODB = "mongodb"
     
     
 class _Backend:
@@ -213,31 +212,11 @@ class _DBUtilsBackend(_Backend):
             logger.error(f"Failed to dispose DBUtils pool for {self._cfg.type} '{self._cfg.database}'")
 
 
-class _MongoBackend(_Backend):
-    def __init__(self, db_cfg: DatabaseConfig):
-        self._cfg = db_cfg
-        self._client = DatabaseConnection(db_cfg).connect()  # returns a MongoClient
-        logger.info(f"Created MongoDB client for {self._cfg.type} '{self._cfg.database}'")
-
-    def _get_client(self):
-        # Do NOT close on context exit; MongoClient.close() would tear down the shared pool
-        return {
-            "conn": self._client,
-            "database_type": self._cfg.type,
-            "database_name": self._cfg.database or "",
-            "db_lib": "pymongo"
-        }
-
-    def dispose(self) -> None:
-        try:
-            self._client.close()
-        except Exception:
-            pass
 
 
 class Pool:
     """
-    Unified Pool over independent backends (SQLAlchemy / DBUtils / MongoDB).
+    Unified Pool over independent backends (SQLAlchemy / DBUtils).
     """
     def __init__(self, backend_obj: _Backend):
         self._b = backend_obj
@@ -259,8 +238,6 @@ class Pool:
             return cls(_SABackend(db_cfg, sa_opts))
         if pool_backend is PoolBackend.DBUTILS:
             return cls(_DBUtilsBackend(db_cfg, dbutils_opts))
-        if pool_backend is PoolBackend.MONGODB:
-            return cls(_MongoBackend(db_cfg))
 
         raise ValueError(f"Unknown backend: {pool_backend!r}")
 
@@ -319,12 +296,6 @@ class Pool:
         try:
             # Get client connection
             client = self._get_client()
-
-            # Skip transaction setup for MongoDB (it has its own transaction model)
-            if client['database_type'].lower() in ['mongodb', 'mongodb+srv']:
-                tx = TransactionContext(client)
-                yield tx
-                return
 
             raw_conn = client['conn']
             # Set autocommit=False on the actual connection (unwrap all pooling wrappers)
@@ -389,7 +360,7 @@ class Pool:
             result = pool.execute_transaction(my_operations)
         """
         with self.transaction(isolation_level) as tx:
-            db = Db(tx.client)
+            db = get_db(tx.client)
             return operations_func(db)
 
     def execute_batch(self,

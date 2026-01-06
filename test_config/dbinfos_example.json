@@ -15,11 +15,8 @@
         "port": 5432,
         "database": "test"
     },
-    "mongodb-test": {
-        "type": "mongodb+srv",
-        "host": "",
-        "user": "",
-        "password": "",
-        "database": "test"
+    "sqlite-test": {
+        "type": "sqlite",
+        "database": "test.db"
     }
 }

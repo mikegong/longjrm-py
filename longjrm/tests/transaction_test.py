@@ -22,7 +22,7 @@ except ImportError:
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
-from longjrm.database.db import Db
+from longjrm.database import get_db
 
 # Configure logging
 logging.basicConfig(
@@ -91,7 +91,7 @@ class TestPoolTransaction:
         for pool_key, pool in self.pools.items():
             try:
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
 
                     # Drop and recreate test table
                     if pool_key.startswith('mysql'):
@@ -124,7 +124,7 @@ class TestPoolTransaction:
         for pool_key, pool in self.pools.items():
             try:
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DROP TABLE IF EXISTS test_transaction", [])
                     logger.info(f"Cleaned up test table for {pool_key}")
             except Exception as e:
@@ -140,13 +140,13 @@ class TestPoolTransaction:
             try:
                 # Clean table before this specific pool's test
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DELETE FROM test_transaction", [])
                     logger.debug(f"Cleaned table before test for {pool_key}")
 
                 # Execute transaction
                 with pool.transaction() as tx:
-                    db = Db(tx.client)
+                    db = get_db(tx.client)
 
                     # Insert multiple rows using Db API
                     db.insert('test_transaction', {'name': 'row1', 'value': 100, 'description': 'First row'})
@@ -156,7 +156,7 @@ class TestPoolTransaction:
 
                 # Verify commit - data should be persisted
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     result = db.select('test_transaction', ['*'])
 
                     assert result['count'] == 2, f"Expected 2 rows, got {result['count']}"
@@ -180,7 +180,7 @@ class TestPoolTransaction:
             try:
                 # Clean table before this specific pool's test
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DELETE FROM test_transaction", [])
                     logger.debug(f"Cleaned table before test for {pool_key}")
 
@@ -188,7 +188,7 @@ class TestPoolTransaction:
                 error_occurred = False
                 try:
                     with pool.transaction() as tx:
-                        db = Db(tx.client)
+                        db = get_db(tx.client)
 
                         # Insert valid row
                         db.insert('test_transaction', {'name': 'row1', 'value': 100, 'description': 'First row'})
@@ -203,7 +203,7 @@ class TestPoolTransaction:
 
                 # Verify rollback - no data should be persisted
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     result = db.select('test_transaction', ['*'])
 
                     assert result['count'] == 0, f"Expected 0 rows after rollback, got {result['count']}"
@@ -227,12 +227,12 @@ class TestPoolTransaction:
             try:
                 # Clean table before this specific pool's test
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DELETE FROM test_transaction", [])
                     logger.debug(f"Cleaned table before test for {pool_key}")
 
                 with pool.transaction() as tx:
-                    db = Db(tx.client)
+                    db = get_db(tx.client)
 
                     # Insert row
                     db.insert('test_transaction', {'name': 'manual', 'value': 123, 'description': 'Manual commit test'})
@@ -246,7 +246,7 @@ class TestPoolTransaction:
 
                 # Verify both rows persisted
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     result = db.select('test_transaction', ['*'])
 
                     assert result['count'] == 2, f"Expected 2 rows, got {result['count']}"
@@ -268,12 +268,12 @@ class TestPoolTransaction:
             try:
                 # Clean table before this specific pool's test
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DELETE FROM test_transaction", [])
                     logger.debug(f"Cleaned table before test for {pool_key}")
 
                 with pool.transaction() as tx:
-                    db = Db(tx.client)
+                    db = get_db(tx.client)
 
                     # Insert row
                     db.insert('test_transaction', {'name': 'rollback', 'value': 789, 'description': 'Manual rollback test'})
@@ -287,7 +287,7 @@ class TestPoolTransaction:
 
                 # Verify only the second row persisted
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     result = db.select('test_transaction', ['*'])
 
                     assert result['count'] == 1, f"Expected 1 row, got {result['count']}"
@@ -310,13 +310,13 @@ class TestPoolTransaction:
             try:
                 # Clean table before this specific pool's test
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DELETE FROM test_transaction", [])
                     logger.debug(f"Cleaned table before test for {pool_key}")
 
                 # Test with SERIALIZABLE isolation level
                 with pool.transaction(isolation_level="SERIALIZABLE") as tx:
-                    db = Db(tx.client)
+                    db = get_db(tx.client)
 
                     db.insert('test_transaction', {'name': 'isolated', 'value': 555, 'description': 'Isolation level test'})
 
@@ -324,7 +324,7 @@ class TestPoolTransaction:
 
                 # Verify data persisted
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     result = db.select('test_transaction', ['*'])
 
                     assert result['count'] == 1
@@ -345,14 +345,14 @@ class TestPoolTransaction:
             try:
                 # Clean table and setup initial data
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DELETE FROM test_transaction", [])
                     logger.debug(f"Cleaned table before test for {pool_key}")
                     db.insert('test_transaction', {'name': 'initial', 'value': 100, 'description': 'Initial data'})
 
                 # Transaction with multiple operations
                 with pool.transaction() as tx:
-                    db = Db(tx.client)
+                    db = get_db(tx.client)
 
                     # Insert
                     db.insert('test_transaction', {'name': 'new', 'value': 200, 'description': 'New row'})
@@ -368,7 +368,7 @@ class TestPoolTransaction:
 
                 # Verify all changes committed
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     result = db.select('test_transaction', ['*'])
 
                     assert result['count'] == 2
@@ -391,18 +391,18 @@ class TestPoolTransaction:
             try:
                 # Clean table before this specific pool's test
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
                     db.execute("DELETE FROM test_transaction", [])
                     logger.debug(f"Cleaned table before test for {pool_key}")
 
                 # Use transaction
                 with pool.transaction() as tx:
-                    db = Db(tx.client)
+                    db = get_db(tx.client)
                     db.insert('test_transaction', {'name': 'test', 'value': 111, 'description': 'State test'})
 
                 # Use regular client - should work with autocommit restored
                 with pool.client() as client:
-                    db = Db(client)
+                    db = get_db(client)
 
                     # This should work with autocommit=True
                     db.insert('test_transaction', {'name': 'autocommit', 'value': 222, 'description': 'Autocommit test'})

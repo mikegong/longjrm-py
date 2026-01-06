@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
-from longjrm.database.db import Db
+from longjrm.database import get_db
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -182,7 +182,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key] = Pool.from_config(db_cfg, backend)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Set up test data
@@ -335,202 +335,6 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key].dispose()
     print(f"SUCCESS: {db_key} connection closed")
 
-def test_mongodb_database(db_key):
-    """Test select functionality for MongoDB"""
-    print(f"\n=== Testing {db_key} Select Operations ===")
-    
-    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
-    configure(cfg)
-    db_cfg = cfg.require(db_key)
-    
-    pools = {}
-    pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
-    
-    with pools[db_key].client() as client:
-        db = Db(client)
-        print(f"Connected to {db.database_type} database: {db.database_name}")
-        
-        # Clean up any existing test data
-        try:
-            collection = client.conn[db.database_name]["test_users"]
-            collection.delete_many({"email": {"$regex": "@selecttest.com$"}})
-            print("SUCCESS: Cleaned up existing test data")
-        except:
-            print("SUCCESS: No existing test data to clean up")
-        
-        # Insert test documents
-        test_documents = [
-            {
-                "name": "Alice Johnson",
-                "email": "alice@selecttest.com",
-                "age": 28,
-                "status": "active",
-                "department": "Engineering",
-                "salary": 75000.50,
-                "metadata": {"level": "Senior", "team": "Backend"},
-                "tags": ["python", "django", "postgresql"],
-                "created_at": datetime.datetime.now()
-            },
-            {
-                "name": "Bob Smith",
-                "email": "bob@selecttest.com",
-                "age": 35,
-                "status": "active",
-                "department": "Sales",
-                "salary": 65000.00,
-                "metadata": {"level": "Manager", "team": "Enterprise"},
-                "tags": ["sales", "b2b", "crm"],
-                "created_at": datetime.datetime.now()
-            },
-            {
-                "name": "Charlie Brown",
-                "email": "charlie@selecttest.com",
-                "age": 42,
-                "status": "inactive",
-                "department": "Engineering",
-                "salary": 95000.75,
-                "metadata": {"level": "Principal", "team": "Platform"},
-                "tags": ["architecture", "kubernetes", "aws"],
-                "created_at": datetime.datetime.now()
-            },
-            {
-                "name": "Diana Wilson",
-                "email": "diana@selecttest.com",
-                "age": 31,
-                "status": "active",
-                "department": "Marketing",
-                "salary": 55000.25,
-                "metadata": {"level": "Senior", "team": "Growth"},
-                "tags": ["marketing", "analytics", "growth"],
-                "created_at": datetime.datetime.now()
-            },
-            {
-                "name": "Eve Davis",
-                "email": "eve@selecttest.com",
-                "age": 26,
-                "status": "active",
-                "department": "Engineering",
-                "salary": 70000.00,
-                "metadata": {"level": "Mid", "team": "Frontend"},
-                "tags": ["javascript", "react", "typescript"],
-                "created_at": datetime.datetime.now()
-            }
-        ]
-        
-        result = db.insert("test_users", test_documents)
-        print(f"MongoDB insert result: {result}")
-        assert result["status"] == 0, "Test data insertion should succeed"
-        assert result["count"] == 5, f"Should insert all 5 test documents, got {result['count']}"
-        print(f"SUCCESS: Inserted {result['count']} test documents")
-        
-        # Test 1: Basic select all documents
-        print("\n--- Test 1: Select All Documents ---")
-        result = db.select("test_users", where={"email": {"$regex": "@selecttest.com$"}})
-        print(f"Select all result: {result}")
-        assert result["data"], "Should return data"
-        assert len(result["data"]) == 5, "Should return 5 test documents"
-        print("SUCCESS: Basic select all documents test passed")
-        
-        # Test 2: Select with specific fields (MongoDB projection)
-        print("\n--- Test 2: Select Specific Fields ---")
-        result = db.select("test_users", ["name", "email", "age"], 
-                          where={"email": {"$regex": "@selecttest.com$"}})
-        print(f"Select specific fields result: {result}")
-        assert result["data"], "Should return data"
-        assert len(result["data"]) == 5, "Should return 5 documents"
-        # MongoDB always includes _id unless explicitly excluded
-        for doc in result["data"]:
-            assert "name" in doc, "Should include name field"
-            assert "email" in doc, "Should include email field"
-            assert "age" in doc, "Should include age field"
-        print("SUCCESS: Select specific fields test passed")
-        
-        # Test 3: MongoDB native query operators
-        print("\n--- Test 3: MongoDB Native Query Operators ---")
-        result = db.select("test_users", where={"age": {"$gt": 30, "$lt": 40}})
-        print(f"MongoDB native query result: {result}")
-        assert result["data"], "Should return data"
-        for doc in result["data"]:
-            assert 30 < doc["age"] < 40, f"Age should be between 30 and 40, got {doc['age']}"
-        print("SUCCESS: MongoDB native query operators test passed")
-        
-        # Test 4: MongoDB regex operator
-        print("\n--- Test 4: MongoDB Regex Operator ---")
-        result = db.select("test_users", where={"name": {"$regex": "^A"}})
-        print(f"MongoDB regex result: {result}")
-        assert result["data"], "Should return data"
-        for doc in result["data"]:
-            assert doc["name"].startswith("A"), f"Name should start with 'A', got {doc['name']}"
-        print("SUCCESS: MongoDB regex operator test passed")
-        
-        # Test 5: MongoDB $in operator
-        print("\n--- Test 5: MongoDB $in Operator ---")
-        result = db.select("test_users", where={"department": {"$in": ["Engineering", "Sales"]}})
-        print(f"MongoDB $in operator result: {result}")
-        assert result["data"], "Should return data"
-        assert len(result["data"]) == 4, "Should return 4 documents (3 Engineering + 1 Sales)"
-        for doc in result["data"]:
-            assert doc["department"] in ["Engineering", "Sales"], "Department should be Engineering or Sales"
-        print("SUCCESS: MongoDB $in operator test passed")
-        
-        # Test 6: MongoDB array field queries
-        print("\n--- Test 6: MongoDB Array Field Queries ---")
-        result = db.select("test_users", where={"tags": "python"})
-        print(f"MongoDB array field query result: {result}")
-        assert result["data"], "Should return data"
-        for doc in result["data"]:
-            assert "python" in doc["tags"], "Document should have 'python' in tags array"
-        print("SUCCESS: MongoDB array field queries test passed")
-        
-        # Test 7: MongoDB nested object queries
-        print("\n--- Test 7: MongoDB Nested Object Queries ---")
-        result = db.select("test_users", where={"metadata.level": "Senior"})
-        print(f"MongoDB nested object query result: {result}")
-        assert result["data"], "Should return data"
-        for doc in result["data"]:
-            assert doc["metadata"]["level"] == "Senior", "Document should have Senior level in metadata"
-        print("SUCCESS: MongoDB nested object queries test passed")
-        
-        # Test 8: Select with options - limit
-        print("\n--- Test 8: Select with Limit Option ---")
-        result = db.select("test_users", 
-                          where={"email": {"$regex": "@selecttest.com$"}},
-                          options={"limit": 2})
-        print(f"Limit option result: {result}")
-        assert result["data"], "Should return data"
-        assert len(result["data"]) == 2, "Should return exactly 2 documents"
-        print("SUCCESS: Limit option test passed")
-        
-        # Test 9: Select with options - sort
-        print("\n--- Test 9: Select with Sort Option ---")
-        result = db.select("test_users", 
-                          where={"email": {"$regex": "@selecttest.com$"}},
-                          options={"order_by": ["age DESC"]})
-        print(f"Sort option result: {result}")
-        assert result["data"], "Should return data"
-        assert len(result["data"]) == 5, "Should return all 5 documents"
-        # Verify descending order by age
-        ages = [doc["age"] for doc in result["data"]]
-        assert ages == sorted(ages, reverse=True), "Ages should be in descending order"
-        print("SUCCESS: Sort option test passed")
-        
-        # Test 10: Select with no results
-        print("\n--- Test 10: Select with No Results ---")
-        result = db.select("test_users", where={"email": "nonexistent@test.com"})
-        print(f"No results select result: {result}")
-        assert len(result["data"]) == 0, "Should return empty data array"
-        assert result["count"] == 0, "Count should be 0"
-        print("SUCCESS: No results test passed")
-        
-        # Clean up test data
-        try:
-            collection.delete_many({"email": {"$regex": "@selecttest.com$"}})
-            print("SUCCESS: Cleaned up test data")
-        except:
-            print("SUCCESS: No test data to clean up")
-    
-    pools[db_key].dispose()
-    print(f"SUCCESS: {db_key} connection closed")
 
 def test_error_handling():
     """Test error handling for select operations"""
@@ -559,7 +363,7 @@ def test_error_handling():
     pools[db_key] = Pool.from_config(cfg.require(db_key), PoolBackend.DBUTILS)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         
         # Test invalid table name
         print("\n--- Test: Invalid Table Name ---")
@@ -617,19 +421,7 @@ if __name__ == "__main__":
             print("ABORTING: Test failed, stopping execution")
             sys.exit(1)  # Abort on first failure
     
-    # Test MongoDB if available
-    try:
-        cfg.require("mongodb-test")
-        print(f"\n>>> Running tests with mongodb-test")
-        test_mongodb_database("mongodb-test")
-        print("SUCCESS: mongodb-test tests completed successfully")
-        combinations_tested += 1
-    except KeyError:
-        print("WARNING: mongodb-test configuration not found, skipping...")
-    except Exception as e:
-        print(f"FAILED: mongodb-test tests failed: {e}")
-        print("ABORTING: MongoDB test failed, stopping execution")
-        sys.exit(1)
+
     
     if combinations_tested == 0:
         print("ERROR: No database configurations found")

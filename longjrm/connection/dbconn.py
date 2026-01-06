@@ -56,8 +56,8 @@ class DatabaseConnection(object):
         connection_error_msg = f"Failed to connect to the {self.database_type} database '{self.database}' at {self.host}{port}"
         
         try:
-            if self.database_type == 'mysql':
-                # db_module is pymysql for mysql database
+            if self.database_type in ['mysql', 'mariadb']:
+                # db_module is pymysql for mysql/mariadb database
                 self.conn = db_module.connect(host=self.host,
                                               user=self.user,
                                               password=self.password,
@@ -76,23 +76,15 @@ class DatabaseConnection(object):
                 self.conn = db_module.connect(dsn)
                 self.conn.autocommit = self.autocommit
                 logger.info(f"{connection_msg}, connection status: {self.conn.status}")
-
-            elif self.database_type in ['mongodb', 'mongodb+srv']:
-                # Note:
-                # 1. Atlas MongoDB cluster has to be connected through connection URL
-                # 2. When MongoClient instance is created, connection pooling is handled automatically
-                # 3. MongoDB Atlas clusters use mongodb+srv protocol that doesn't support explicit port numbers
-                
-                if not self.dsn:
-                    dsn = f"{self.database_type}://{self.user}:{self.password}@{self.host}{port}/{self.database}"
-                else:
-                    dsn = self.dsn
-
-                self.conn = db_module.MongoClient(dsn)
-                # An immediate connection can be forced by checking server function
-                # self.conn.admin.command('ismaster')
-                logger.info(f"{connection_msg}")
-
+            
+            elif self.database_type == 'sqlite':
+                # SQLite uses file path as database, or ':memory:' for in-memory database
+                db_path = self.database or ':memory:'
+                self.conn = db_module.connect(db_path)
+                # SQLite isolation_level=None enables autocommit
+                if self.autocommit:
+                    self.conn.isolation_level = None
+                logger.info(f"Connected to SQLite database: {db_path}")
             else:
                 raise ValueError("Invalid database type")
 
@@ -151,18 +143,49 @@ def set_autocommit(dbapi_conn, autocommit: bool):
         elif hasattr(dbapi_conn, "autocommit") and callable(getattr(dbapi_conn, "autocommit")):
             dbapi_conn.autocommit(autocommit)         # PyMySQL (method)
         else:
-            raise ValueError(f"Autocommit not supported for connection type: {type(dbapi_conn).__name__}")
+            logger.warning(f"Autocommit not supported for connection type: {type(dbapi_conn).__name__}")
     except Exception as e:
-        raise ValueError(f"Function set_autocommit error for this connection: {e}")
+        raise ValueError(f"Function set_autocommit error for this connection: {e}") from e
+
+
+def get_autocommit(dbapi_conn):
+    """
+    Get current autocommit state from a raw DB-API connection.
+
+    Args:
+        dbapi_conn: Raw DB-API connection object
+        
+    Returns:
+        bool: Current autocommit state
+    """
+    try:
+        if hasattr(dbapi_conn, "autocommit"):
+            autocommit_attr = getattr(dbapi_conn, "autocommit")
+            if callable(autocommit_attr):
+                # PyMySQL: autocommit is a method, need to check get_autocommit
+                if hasattr(dbapi_conn, "get_autocommit"):
+                    return dbapi_conn.get_autocommit()
+                # Fallback: assume True if we can't determine
+                return True
+            else:
+                # psycopg/psycopg2: autocommit is a property
+                return autocommit_attr
+        else:
+            logger.warning(f"get_autocommit not supported for connection type: {type(dbapi_conn).__name__}")
+            return True  # Default to True if unknown
+    except Exception as e:
+        raise ValueError(f"Function get_autocommit error for this connection: {e}") from e
 
 
 def set_isolation_level(dbapi_conn, database_type, isolation_level: str):
     """Set transaction isolation level."""
+    cur = None
     try:
+        cur = dbapi_conn.cursor()
         if database_type.lower() in ['postgres', 'postgresql']:
-            dbapi_conn.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+            cur.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
         elif database_type.lower() == 'mysql':
-            dbapi_conn.execute(f"SET SESSION TRANSACTION ISOLATION LEVEL {isolation_level}")
+            cur.execute(f"SET SESSION TRANSACTION ISOLATION LEVEL {isolation_level}")
         elif database_type.lower() == 'sqlite':
             # SQLite has limited isolation level support
             logger.warning("SQLite has limited isolation level support")
@@ -171,6 +194,9 @@ def set_isolation_level(dbapi_conn, database_type, isolation_level: str):
             raise ValueError(f"Isolation level setting not implemented for {database_type}")
     except Exception as e:
         raise ValueError(f"Failed to set isolation level {isolation_level} for {database_type}: {e}")
+    finally:
+        if cur:
+            cur.close()
 
 class JrmConnectionError(Exception):
     """Raise exception when a connection failed."""
