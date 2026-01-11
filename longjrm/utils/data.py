@@ -119,18 +119,20 @@ def replace_nth(string, old, new, n):
     return new_string
 
 
-def escape_csv_row(values, null_value=''):
+def escape_csv_row(values, null_value='', quotechar=None):
     """
     Escape a row of values for CSV output.
     
     Handles:
     - None values -> empty string (or custom null_value)
     - Strings with commas, quotes, or newlines -> quoted
+    - Strings with leading/trailing spaces -> quoted
     - Double quotes -> escaped as ""
     
     Args:
         values: List of values to escape
         null_value: String to use for None/NULL values
+        quotechar: If set to 'Y', enforce double quotes on all strings
         
     Returns:
         List of escaped string values
@@ -144,8 +146,13 @@ def escape_csv_row(values, null_value=''):
             # Escape double quotes by doubling them
             if '"' in escaped_value:
                 escaped_value = escaped_value.replace('"', '""')
-            # Quote if contains comma, quote, newline, or is empty/whitespace
-            if ',' in escaped_value or '"' in value or '\n' in escaped_value or escaped_value.strip() == '':
+            
+            # Quote if contains comma, quote, newline, or is empty/whitespace,
+            # or has leading/trailing spaces, or if forced quoting is enabled
+            if (',' in escaped_value or '"' in value or '\n' in escaped_value or 
+                escaped_value.strip() == '' or 
+                (len(escaped_value) > 0 and (escaped_value[0] == ' ' or escaped_value[-1] == ' ')) or
+                quotechar == 'Y'):
                 escaped_value = '"' + escaped_value + '"'
         else:
             escaped_value = str(value)
@@ -211,6 +218,5 @@ def datalist_to_dataseq(datalist, bulk_size=0, check_current_fn=None, unescape_c
         dataseq.append(tuple(row_data))
 
         if i + 1 == len(datalist) or (bulk_size != 0 and divmod(i + 1, bulk_size)[1] == 0):
-            yield tuple(dataseq)
+            yield dataseq
             dataseq = []
-

@@ -7,7 +7,6 @@ data - json data including column and value pairs
 where condition - json data that defines where column and value pairs
 */
 """
-
 import json
 import re
 import datetime
@@ -15,7 +14,7 @@ import logging
 import traceback
 from longjrm.config.runtime import get_config
 from longjrm.database.placeholder_handler import PlaceholderHandler
-from longjrm.connection import dbconn
+from longjrm.connection.connectors import get_connector_class, unwrap_connection
 from longjrm.utils import sql as sql_utils, data as data_utils
 
 
@@ -26,15 +25,15 @@ class Db:
     Base database class for JSON Relational Mapping operations.
     
     Note: 
-    self.conn is a raw DB-API connection (e.g., psycopg2.connection,
-    pymysql.Connection), NOT a DatabaseConnection wrapper.
+    self.conn is a raw DB-API connection (e.g., psycopg.Connection,
+    pymysql.Connection), NOT a Connector wrapper.
     
     For driver-specific operations like autocommit, we use standalone functions
-    from dbconn module which handle different driver APIs transparently.
+    from connector classes which handle different driver APIs.
     """
 
     def __init__(self, client):
-        # client['conn'] is the raw DB-API connection from DatabaseConnection.connect()
+        # client['conn'] is the raw DB-API connection from Connector.connect()
         self.conn = client['conn']
         self.database_type = client['database_type']
         self.database_name = client['database_name']
@@ -72,16 +71,24 @@ class Db:
         raise NotImplementedError("Subclasses must implement _build_upsert_clause with database-specific syntax")
 
     # -------------------------------------------------------------------------
-    # Transaction control - uses dbconn functions for driver-specific handling
+    # Transaction control - uses connector methods for driver-specific handling
     # -------------------------------------------------------------------------
     
     def set_autocommit(self, value):
-        """Set autocommit mode. Uses dbconn for driver-specific handling."""
-        dbconn.set_autocommit(self.conn, value)
+        """Set autocommit mode using connector-specific logic."""
+        if self.conn is None:
+            return
+        # Unwrap pooled connection wrappers (DBUtils/SQLAlchemy) to get actual DB-API connection
+        actual_conn = unwrap_connection(self.conn)
+        get_connector_class(self.database_type).set_dbapi_autocommit(actual_conn, value)
     
     def get_autocommit(self):
-        """Get current autocommit state. Uses dbconn for driver-specific handling."""
-        return dbconn.get_autocommit(self.conn)
+        """Get current autocommit state using connector-specific logic."""
+        if self.conn is None:
+            return True
+        # Unwrap pooled connection wrappers (DBUtils/SQLAlchemy) to get actual DB-API connection
+        actual_conn = unwrap_connection(self.conn)
+        return get_connector_class(self.database_type).get_dbapi_autocommit(actual_conn)
 
     def commit(self):
         """Commit the current transaction."""
@@ -105,6 +112,26 @@ class Db:
         """
         return ""
 
+    def bulk_load(self, table, load_info=None, *, command=None):
+        """
+        Bulk load data into table using database-specific high-performance method.
+        
+        Args:
+            table: Target table name
+            load_info: Data source or configuration (used if command is not provided).
+                Can be:
+                - Config dictionary (RECOMMENDED): {'source': '...', 'delimiter': ',', ...}
+                - Source string: File path or SQL query (uses default options)
+            command: Optional raw database-specific bulk load command. If provided,
+                it takes precedence over load_info.
+        Raises:
+            NotImplementedError: If the database does not support bulk loading
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support bulk_load(). "
+            f"Use insert() with a list for batch operations instead."
+        )
+
     def select(self, table, columns=None, where=None, options=None):
         """
         Execute SELECT query.
@@ -126,12 +153,25 @@ class Db:
         if not str_column:
             raise ValueError('Invalid columns')
 
-        str_where, arr_values = sql_utils.where_parser(where, self.placeholder)
-        str_order = ' order by ' + ', '.join(options.get('order_by', [])) if options.get('order_by') else ''
-        str_limit = '' if not options.get('limit') or options.get('limit') == 0 else ' limit ' + str(options['limit'])
+        # Check for dynamic_param option, which may provide better performance in some scenarios
+        inline = False
+        if options and options.get('dynamic_param') == 'N':
+            inline = True
 
-        select_query = "select " + str_column + " from " + table + str_where + str_order + str_limit
+        str_where, arr_values = sql_utils.where_parser(where, self.placeholder, inline=inline)
+        str_order = ' order by ' + ', '.join(options.get('order_by', [])) if options.get('order_by') else ''
+        limit = options.get('limit')
+        
+        select_query = self._construct_select_sql(table, str_column, str_where, str_order, limit)
         return select_query, arr_values
+
+    def _construct_select_sql(self, table, str_column, str_where, str_order, limit):
+        """
+        Construct final SELECT SQL string.
+        Can be overridden by subclasses (e.g. SqlServer uses TOP instead of LIMIT).
+        """
+        str_limit = '' if not limit or limit == 0 else ' limit ' + str(limit)
+        return "select " + str_column + " from " + table + str_where + str_order + str_limit
 
     def _prepare_sql(self, sql, arr_values):
         """
@@ -192,12 +232,38 @@ class Db:
             sql, processed_values = self._prepare_sql(sql, arr_values)
                 
             logger.debug(f"Executing query: {sql}")
-            cur.execute(sql, processed_values)
+            if processed_values:
+                cur.execute(sql, processed_values)
+            else:
+                cur.execute(sql)
             
             rows = cur.fetchall()
-            columns = list(rows[0].keys()) if len(rows) > 0 else []
-            logger.info(f"Query completed successfully with {len(rows)} rows returned")
-            return {"status": 0, "message": "Query completed successfully", "data": rows, "columns": columns, "count": len(rows)}
+            
+            # Check if we have results
+            columns = []
+            final_rows = rows
+            
+            if cur.description:
+                columns = [col[0].lower() for col in cur.description]
+                
+            if rows and len(rows) > 0:
+                first_row = rows[0]
+                # If rows are tuples/lists (standard DB-API), convert to dicts
+                if not isinstance(first_row, dict):
+                    if not columns:
+                        # Should not happen for SELECTs
+                        logger.warning("Rows returned but no cursor.description available")
+                    else:
+                        processed_rows = []
+                        for row in rows:
+                            processed_rows.append(dict(zip(columns, row)))
+                        final_rows = processed_rows
+                # If rows are already dict-like (e.g. RealDictRow), ensure columns are set if not already
+                elif hasattr(first_row, 'keys') and not columns:
+                     columns = list(first_row.keys())
+
+            logger.info(f"Query completed successfully with {len(final_rows)} rows returned")
+            return {"status": 0, "message": "Query completed successfully", "data": final_rows, "columns": columns, "count": len(final_rows)}
 
         finally:
             if cur:
@@ -231,9 +297,17 @@ class Db:
             # Prepare SQL with placeholder conversion and escaping
             sql, processed_values = self._prepare_sql(sql, arr_values)
             
-            cur.execute(sql, processed_values)
+            if processed_values:
+                cur.execute(sql, processed_values)
+            else:
+                cur.execute(sql)
             logger.debug(f"Stream query executed: {sql}")
             
+            # Pre-fetch columns for tuple conversion if needed
+            columns = []
+            if cur.description:
+                columns = [col[0].lower() for col in cur.description]
+
             # Fetch and yield rows one by one
             while True:
                 try:
@@ -242,8 +316,15 @@ class Db:
                         break
                     
                     row_number += 1
-                    # Convert RealDictRow to regular dict for consistency
-                    yield row_number, dict(row), 0
+                    
+                    row_dict = {}
+                    if columns and not isinstance(row, dict):
+                         row_dict = dict(zip(columns, row))
+                    else:
+                         # Assume dict-like (RealDictRow) or try conversion
+                         row_dict = dict(row)
+                         
+                    yield row_number, row_dict, 0
                     
                 except Exception as e:
                     current_error_count += 1
@@ -267,320 +348,173 @@ class Db:
             if cur:
                 cur.close()
 
-    def stream_insert(self, stream, table, *, commit_count=10000, max_error_count=0):
+    def stream_query_batch(self, sql, arr_values=None, *, batch_size=1000, max_error_count=0):
         """
-        Insert stream data into table with optional periodic commits.
-        
-        This method consumes a stream (generator/iterator) of rows and inserts them
-        into the specified table. It supports transactional control with periodic commits
-        for large data sets.
+        Execute query and stream results in batches (buckets) row by row using generator.
         
         Args:
-            stream: Iterator/generator yielding rows in one of these formats:
-                - (row_number, row_dict): Simple format with row number and data
-                - (row_number, row_dict, status): Extended format including status (0=success, -1=error)
-            table: Target table/collection name to insert into
-            commit_count: Number of rows between commits.
-                         - When > 0: Disables autocommit, performs manual commits every N rows,
-                                   commits remaining rows at end, restores original autocommit state.
-                         - When = 0: Respects current autocommit setting, no manual commits.
-                                   Caller is responsible for committing if autocommit is disabled.
-                         Default is 10000 for batch transaction control.
-            max_error_count: Maximum number of errors to tolerate before failing (default 0)
-                          
+            sql: SQL statement to execute
+            arr_values: values to bind to query
+            batch_size: Number of rows per batch (bucket)
+            max_error_count: Maximum number of errors to tolerate
+            
+        Yields:
+             tuple of (row_number, batch_data, status):
+                - row_number: Total rows yielded so far (at end of batch)
+                - batch_data: List of row dictionaries
+                - status: 0 for success, -1 for error
+        """
+        buck_data = []
+        total_rows = 0
+        last_status = 0
+        
+        try:
+            for row_num, row, status in self.stream_query(sql, arr_values, max_error_count=max_error_count):
+                total_rows = row_num
+                last_status = status
+                
+                if status == 0:
+                    buck_data.append(row)
+                    
+                    if len(buck_data) >= batch_size:
+                        logger.info(f"Batch of {len(buck_data)} rows sent to downstream (Total: {total_rows})")
+                        yield total_rows, buck_data, 0
+                        buck_data = []
+                else:
+                    # Propagate error immediately, or handle as per policy.
+                    # Legacy behavior yielded (row_number, {}, -1).
+                    yield row_num, {}, -1
+            
+            # Yield remaining rows
+            if buck_data:
+                logger.info(f"Final batch of {len(buck_data)} rows sent to downstream (Total: {total_rows})")
+                yield total_rows, buck_data, 0
+                
+        except Exception as e:
+            logger.error(f"stream_query_batch failed: {e}", exc_info=True)
+            yield total_rows, [], -1
+
+    def _stream_transaction_handler(self, stream, operation_func, commit_count=10000, max_error_count=0, table_name="unknown"):
+        """
+        Generic handler for stream-based transactional operations (insert/update/merge).
+        
+        Args:
+            stream: Iterator yielding rows
+            operation_func: Callable(row, row_number) -> result_dict
+            commit_count: Rows between commits (0 to disable manual commit control)
+            max_error_count: Max errors allowed
+            table_name: Name of table for logging
+            
         Returns:
-            Dictionary with:
-                - status: 0 for success, -1 for failure
-                - record_count: Number of rows processed
-                - message: Descriptive message about the operation result
+            Result dictionary
         """
         row_number = 0
         result = {}
-        autocommit_was_enabled = True  # Track original autocommit state
+        autocommit_was_enabled = True
         current_error_count = 0
         
         try:
-            # Determine autocommit handling based on commit_count
             if commit_count != 0:
-                # Transaction mode - manual commits every commit_count rows
                 autocommit_was_enabled = self.get_autocommit()
                 self.set_autocommit(False)
             
             for stream_row in stream:
-                row_number, row, row_status = stream_row
-                # Check for upstream errors
-                if row_status and row_status != 0:
+                # Normalize stream row format
+                if len(stream_row) == 3:
+                     row_number, row, row_status = stream_row
+                else:
+                     row_number, row = stream_row
+                     row_status = 0
+                
+                # Check upstream status
+                if row_status != 0:
                     current_error_count += 1
-                    message = f"Upstream error at row {row_number} to table {table} (Error {current_error_count}/{max_error_count})"
+                    message = f"Upstream error at row {row_number} to table {table_name} (Error {current_error_count}/{max_error_count})"
                     logger.warning(message)
                     
                     if current_error_count > max_error_count:
-                        # Rollback any uncommitted changes
-                        if commit_count != 0:
-                            self.rollback()
+                        if commit_count != 0: self.rollback()
                         return {"status": -1, "record_count": row_number, "message": message}
-                    
-                    # Continue to next row if tolerating error
                     continue
                 
-                # Insert the row
-                result = self.insert(table, row)
+                # Execute operation
+                result = operation_func(row, row_number)
                 
                 if result.get('status') != 0:
                     current_error_count += 1
-                    message = f"Failed to insert into table {table} at row {row_number} (Error {current_error_count}/{max_error_count}): {result.get('message', 'Unknown error')}"
+                    message = f"Failed to process row {row_number} in {table_name} (Error {current_error_count}/{max_error_count}): {result.get('message', 'Unknown error')}"
                     logger.warning(message)
-                        
-                    if current_error_count > max_error_count:
-                        if commit_count != 0:
-                            self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
                     
-                    # Continue if tolerating error. 
+                    if current_error_count > max_error_count:
+                        if commit_count != 0: self.rollback()
+                        return {"status": -1, "record_count": row_number, "message": message}
                     continue
                 
-                # Periodic commit based on commit_count
-                if commit_count != 0 and row_number % commit_count == 0:
+                # Periodic commit
+                if commit_count != 0 and row_number > 0 and row_number % commit_count == 0:
                     self.commit()
-                    logger.info(f"Committed {row_number} rows into {table}")
-
-            # Final commit for remaining rows
-            if result:  # Stream was not empty
-                if result.get('status') == 0:
-                    if commit_count != 0:
-                        self.commit()
-                    message = f"{row_number} rows inserted into {table} successfully"
-                    logger.info(message)
-                    return {"status": 0, "record_count": row_number, "message": message}
-            else:
-                # Empty stream
-                message = "Incoming stream is empty"
+                    logger.info(f"Committed {row_number} rows into {table_name}")
+            
+            # Final processing
+            if row_number == 0:
+                message = f"Incoming stream for {table_name} is empty"
                 logger.info(message)
                 return {"status": 0, "record_count": 0, "message": message}
+                
+            if commit_count != 0:
+                self.commit()
+                
+            message = f"{row_number} rows processed into {table_name} successfully"
+            logger.info(message)
+            return {"status": 0, "record_count": row_number, "message": message}
 
         except Exception as e:
-            # Database exceptions are always fatal
-            error_message = f"Fatal database error during insert at row {row_number}: {e}"
+            error_message = f"Fatal database error at row {row_number}: {e}"
             logger.error(error_message, exc_info=True)
             if commit_count != 0:
                 self.rollback()
             return {"status": -1, "record_count": row_number, "message": error_message}
-
+            
         finally:
             if commit_count != 0:
                 self.set_autocommit(autocommit_was_enabled)
+
+    def stream_insert(self, stream, table, *, commit_count=10000, max_error_count=0):
+        """
+        Insert stream data into table with optional periodic commits.
+        """
+        def op(row, _):
+            return self.insert(table, row)
+            
+        return self._stream_transaction_handler(
+            stream, op, commit_count, max_error_count, table_name=table
+        )
 
     def stream_update(self, stream, table, *, commit_count=10000, max_error_count=0):
         """
         Update table from stream data with optional periodic commits.
-        
-        This method consumes a stream (generator/iterator) of update operations and applies
-        them to the specified table. Each stream row must contain both the data to update
-        and the condition (where clause) for identifying rows to update.
-        
-        Args:
-            stream: Iterator/generator yielding rows in one of these formats:
-                - (row_number, row_dict): Simple format where row_dict contains:
-                    - 'data': dict of column-value pairs to update
-                    - 'condition': dict defining the where clause
-                - (row_number, row_dict, status): Extended format including status (0=success, -1=error)
-            table: Target table/collection name to update
-            commit_count: Number of rows between commits.
-                         - When > 0: Disables autocommit, performs manual commits every N rows,
-                                   commits remaining rows at end, restores original autocommit state.
-                         - When = 0: Respects current autocommit setting, no manual commits.
-                                   Caller is responsible for committing if autocommit is disabled.
-                         Default is 10000 for batch transaction control.
-            max_error_count: Maximum number of errors to tolerate before failing (default 0)
-                          
-        Returns:
-            Dictionary with:
-                - status: 0 for success, -1 for failure
-                - record_count: Number of rows processed
-                - message: Descriptive message about the operation result
         """
-        row_number = 0
-        result = {}
-        autocommit_was_enabled = True  # Track original autocommit state
-        current_error_count = 0
-        
-        try:
-            # Determine autocommit handling based on commit_count
-            if commit_count != 0:
-                # Transaction mode - manual commits every commit_count rows
-                autocommit_was_enabled = self.get_autocommit()
-                self.set_autocommit(False)
+        def op(row, row_num):
+            if not isinstance(row, dict) or 'data' not in row or 'condition' not in row:
+                return {"status": -1, "message": "Invalid row format: expected dict with 'data' and 'condition'"}
+            return self.update(table, row['data'], row['condition'])
             
-            for stream_row in stream:
-                row_status = 0
-                row_number, row, row_status = stream_row
-                
-                # Check for upstream errors
-                if row_status and row_status != 0:
-                    current_error_count += 1
-                    message = f"Upstream error at row {row_number} to table {table} (Error {current_error_count}/{max_error_count})"
-                    logger.warning(message)
-                    
-                    if current_error_count > max_error_count:
-                        if commit_count != 0:
-                            self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
-                    continue
-                
-                # Validate row structure
-                if not isinstance(row, dict) or 'data' not in row or 'condition' not in row:
-                    current_error_count += 1
-                    message = f"Invalid row format at row {row_number}: expected dict with 'data' and 'condition' keys (Error {current_error_count}/{max_error_count})"
-                    logger.warning(message)
-                    
-                    if current_error_count > max_error_count:
-                        if commit_count != 0:
-                            self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
-                    continue
-                
-                # Update the row
-                result = self.update(table, row['data'], row['condition'])
-                
-                if result.get('status') != 0:
-                    current_error_count += 1
-                    message = f"Failed to update table {table} at row {row_number} (Error {current_error_count}/{max_error_count}): {result.get('message', 'Unknown error')}"
-                    logger.warning(message)
-                    
-                    if current_error_count > max_error_count:
-                        if commit_count != 0:
-                            self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
-                    continue
-                
-                # Periodic commit based on commit_count
-                if commit_count != 0 and row_number % commit_count == 0:
-                    self.commit()
-                    logger.info(f"Committed {row_number} updates into {table}")
-            
-            # Final commit for remaining updates
-            if result:  # Stream was not empty
-                if result.get('status') == 0:
-                    if commit_count != 0:
-                        self.commit()
-                    message = f"{row_number} rows updated in {table} successfully"
-                    logger.info(message)
-                    return {"status": 0, "record_count": row_number, "message": message}
-            else:
-                # Empty stream
-                message = "Incoming stream is empty"
-                logger.info(message)
-                return {"status": 0, "record_count": 0, "message": message}
-
-
-        except Exception as e:
-            # Database exceptions are always fatal
-            error_message = f"Fatal database error during update at row {row_number}: {e}"
-            logger.error(error_message, exc_info=True)
-            if commit_count != 0:
-                self.rollback()
-            return {"status": -1, "record_count": row_number, "message": error_message}
-
-        finally:
-            if commit_count != 0:
-                self.set_autocommit(autocommit_was_enabled)
+        return self._stream_transaction_handler(
+            stream, op, commit_count, max_error_count, table_name=table
+        )
 
     def stream_merge(self, stream, table, key_columns, *, commit_count=10000, max_error_count=0):
         """
         Merge (upsert) stream data into table with optional periodic commits.
-        
-        This method consumes a stream (generator/iterator) of rows and merges them
-        into the specified table. For each row, it performs an INSERT if the record
-        doesn't exist (based on key_columns), or UPDATE if it does exist.
-        
-        Args:
-            stream: Iterator/generator yielding rows in one of these formats:
-                - (row_number, row_dict): Simple format with row number and data
-                - (row_number, row_dict, status): Extended format including status (0=success, -1=error)
-            table: Target table/collection name to merge into
-            key_columns: List of column names that define uniqueness for matching records
-            commit_count: Number of rows between commits.
-                         - When > 0: Disables autocommit, performs manual commits every N rows,
-                                   commits remaining rows at end, restores original autocommit state.
-                         - When = 0: Respects current autocommit setting, no manual commits.
-                                   Caller is responsible for committing if autocommit is disabled.
-                         Default is 10000 for batch transaction control.
-            max_error_count: Maximum number of errors to tolerate before failing (default 0)
-                          
-        Returns:
-            Dictionary with:
-                - status: 0 for success, -1 for failure
-                - record_count: Number of rows processed
-                - message: Descriptive message about the operation result
         """
-        row_number = 0
-        result = {}
-        autocommit_was_enabled = True  # Track original autocommit state
-        current_error_count = 0
-        
-        try:
-            # Determine autocommit handling based on commit_count
-            if commit_count != 0:
-                # Transaction mode - manual commits every commit_count rows
-                autocommit_was_enabled = self.get_autocommit()
-                self.set_autocommit(False)
+        def op(row, _):
+            return self.merge(table, row, key_columns)
             
-            for stream_row in stream:
-                row_status = 0
-                row_number, row, row_status = stream_row
-                
-                if row_status and row_status != 0:
-                    current_error_count += 1
-                    message = f"Upstream error at row {row_number} to table {table} (Error {current_error_count}/{max_error_count})"
-                    logger.warning(message)
-                    
-                    if current_error_count > max_error_count:
-                        if commit_count != 0:
-                            self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
-                    continue
-                
-                result = self.merge(table, row, key_columns)
-                
-                if result.get('status') != 0:
-                    current_error_count += 1
-                    message = f"Failed to merge into table {table} at row {row_number} (Error {current_error_count}/{max_error_count}): {result.get('message', 'Unknown error')}"
-                    logger.warning(message)
-                    
-                    if current_error_count > max_error_count:
-                        if commit_count != 0:
-                            self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
-                    continue
-                
-                if commit_count != 0 and row_number % commit_count == 0:
-                    self.commit()
-                    logger.info(f"Committed {row_number} merges into {table}")
-            
-            if row_number == 0:
-                message = f"Incoming stream for {table} is empty"
-                logger.info(message)
-                return {"status": 0, "record_count": 0, "message": message}
-            elif result.get('status') == 0:
-                if commit_count != 0:
-                    self.commit()
-                message = f"{row_number} rows merged into {table} successfully"
-                logger.info(message)
-                return {"status": 0, "record_count": row_number, "message": message}
+        return self._stream_transaction_handler(
+            stream, op, commit_count, max_error_count, table_name=table
+        )
 
-        except Exception as e:
-            # Database exceptions are always fatal
-            error_message = f"Fatal database error during merge at row {row_number}: {e}"
-            logger.error(error_message, exc_info=True)
-            if commit_count != 0:
-                self.rollback()
-            return {"status": -1, "record_count": row_number, "message": error_message}
-
-        finally:
-            if commit_count != 0:
-                self.set_autocommit(autocommit_was_enabled)
-
-    def insert(self, table, data, return_columns=None):
+    def insert(self, table, data, return_columns=None, bulk_size=1000):
         """
         Insert data in JSON format into table
         Args:
@@ -589,37 +523,79 @@ class Db:
                   - Single record: {"col1": "val1", "col2": "val2"}
                   - Multiple records: [{"col1": "val1"}, {"col1": "val2"}]
             return_columns: optional list of columns to return from inserted records
+            bulk_size: number of records per batch for bulk inserts (default 1000)
         Returns:
             dictionary with status, message, data (empty), and count (affected rows)
         """
         if return_columns is None:
             return_columns = []
             
+        # Handle both single record and bulk insert
+        if isinstance(data, list):
+            return self._bulk_insert(table, data, return_columns, bulk_size)
+        else:
+            return self._single_insert(table, data, return_columns)
+
+    def _single_insert(self, table, data, return_columns=None):
+        """
+        Internal method to handle single record insert.
+        """
         # construct SQL and values, then use execute()
-        insert_query, arr_values = self._insert_constructor(table, data, return_columns)
+        insert_query, arr_values = self._single_insert_constructor(table, data, return_columns)
         if return_columns:
             return self.query(insert_query, arr_values)
         else:
             return self.execute(insert_query, arr_values)
 
-    def _insert_constructor(self, table, data, return_columns=None):
+    def _bulk_insert(self, table, data_list, return_columns=None, bulk_size=1000):
         """
-        Construct SQL INSERT statement from JSON data
-        Args:
-            table: target table name
-            data: JSON data - either single record or list of records
-            return_columns: optional list of columns to return from inserted records
-        Returns:
-            tuple of (sql_query, values_array)
+        Internal method to handle bulk insert using executemany.
         """
-        if return_columns is None:
-            return_columns = []
+        if not data_list:
+            return {"status": 0, "message": "No data to insert", "data": [], "count": 0}
+
+        row_count = len(data_list)
+        
+        # Validate uniform columns based on first record
+        first_row = data_list[0]
+        columns = list(first_row.keys())
+        str_col = ', '.join(columns)
+        placeholders = [self.placeholder for _ in columns]
+        str_qm = ', '.join(placeholders)
+        
+        # Construct a standard single-row INSERT statement
+        sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm})"
+
+        total_affected = 0
+        cur = None
+        try:
+            cur = self.get_cursor()
             
-        # Handle both single record and bulk insert
-        if isinstance(data, list):
-            return self._bulk_insert_constructor(table, data, return_columns)
-        else:
-            return self._single_insert_constructor(table, data, return_columns)
+            for batch in data_utils.datalist_to_dataseq(data_list, bulk_size=bulk_size):
+                cur.executemany(sql, batch)
+                
+                # Try to accumulate affected rows if driver supports it
+                # Use getattr to safely check for rowcount attribute without explicit try/catch for AttributeError
+                row_count_val = getattr(cur, 'rowcount', -1)
+                if row_count_val > 0:
+                    total_affected += row_count_val
+        
+            if total_affected <= 0 and row_count > 0:
+                total_affected = row_count # Fallback if driver doesn't report count
+                
+            message = f"BULK INSERT succeeded. {total_affected} rows affected."
+            logger.info(message)
+            return {"status": 0, "message": message, "data": [], "count": total_affected}
+            
+        except Exception as e:
+            message = f'Failed to execute bulk insert: {e}'
+            logger.error(message)
+            logger.error(traceback.format_exc())
+            return {"status": -1, "message": message}
+
+        finally:
+            if cur:
+                cur.close()
 
     def _single_insert_constructor(self, table, data, return_columns=None):
         """
@@ -634,61 +610,24 @@ class Db:
         # Use placeholder for all values; CURRENT keywords will be injected by inject_current later
         placeholders = [self.placeholder for _ in columns]
         str_qm = ', '.join(placeholders)
+        values_sql = f"({str_qm})"
         
         list_val = [self._process_value(data[k]) for k in columns]
 
-        if return_columns and self.supports_returning():
-            returning_clause = self.get_returning_clause(return_columns)
-            sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm}){returning_clause}"
-        else:
-            sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm})"
+        sql = self._construct_insert_sql(table, str_col, values_sql, return_columns)
 
         return sql, list_val
 
-    def _bulk_insert_constructor(self, table, data_list, return_columns=None):
+    def _construct_insert_sql(self, table, str_col, values_sql, return_columns):
         """
-        Construct SQL INSERT statement for bulk records using single SQL with multiple VALUES
+        Construct final INSERT SQL string.
+        Can be overridden by subclasses (e.g. Db2) for databases with wrapping syntax.
         """
-        if return_columns is None:
-            return_columns = []
-            
-        if not data_list:
-            return "SELECT 1 WHERE 1=0", []  # No-op query for empty list
-            
-        # Validate all records have consistent columns
-        first_record_keys = set(data_list[0].keys())
-        for i, record in enumerate(data_list):
-            if set(record.keys()) != first_record_keys:
-                raise ValueError(f"Record {i} has inconsistent columns. Expected: {first_record_keys}, Got: {set(record.keys())}")
-        
-        # Get columns from first record
-        columns = list(data_list[0].keys())
-        str_col = ', '.join(columns)
-        
-        # Build multiple VALUES clauses and collect all values
-        values_clauses = []
-        all_values = []
-        
-        for record in data_list:
-            record_placeholders = []
-            for col in columns:
-                # Regular value: process it and add placeholder
-                data_value = self._process_value(record[col])
-                record_placeholders.append(self.placeholder)
-                all_values.append(data_value)
-            
-            values_clauses.append(f"({', '.join(record_placeholders)})")
-        
-        # Construct INSERT statement with multiple VALUES
-        values_sql = ', '.join(values_clauses)
-        
         if return_columns and self.supports_returning():
             returning_clause = self.get_returning_clause(return_columns)
-            sql = f"INSERT INTO {table} ({str_col}) VALUES {values_sql}{returning_clause}"
+            return f"INSERT INTO {table} ({str_col}) VALUES {values_sql}{returning_clause}"
         else:
-            sql = f"INSERT INTO {table} ({str_col}) VALUES {values_sql}"
-        
-        return sql, all_values
+            return f"INSERT INTO {table} ({str_col}) VALUES {values_sql}"
 
     def _process_value(self, value):
         """
@@ -705,7 +644,7 @@ class Db:
                 return json.dumps(value, ensure_ascii=False)
             else:
                 # For simple lists, pass as-is to database driver
-                # The driver will handle conversion (e.g., psycopg2 -> PostgreSQL arrays)
+                # The driver will handle conversion (e.g., psycopg -> PostgreSQL arrays)
                 return value
         elif isinstance(value, datetime.date):
             return str(value)
@@ -718,7 +657,7 @@ class Db:
 
     def execute(self, sql, arr_values=None):
         """
-        Execute query with no return result set such as insert, update, delete, etc.
+        Execute query with no return result set such as update, delete, and DDLs like create table, etc.
         Args:
             sql: SQL statement to execute
             arr_values: values that need to be bound to query (supports both positional and named placeholders)
@@ -739,7 +678,10 @@ class Db:
 
             # Execute the statement
             logger.debug(f"Executing query: {sql}")
-            cur.execute(sql, processed_values)
+            if processed_values:
+                cur.execute(sql, processed_values)
+            else:
+                cur.execute(sql)
             
             # Get affected row count
             affected_rows = cur.rowcount
@@ -781,6 +723,110 @@ class Db:
         # construct SQL and values, then use execute()
         update_query, arr_values = self._update_constructor(table, data, where)
         return self.execute(update_query, arr_values)
+
+    def bulk_update(self, table, data_list, key_columns, bulk_size=1000):
+        """
+        Update multiple rows in bulk using executemany for performance.
+        
+        Args:
+            table: Target table name
+            data_list: List of dictionaries containing data to update + key values.
+                      All dictionaries must have the same keys.
+            key_columns: List of column names to use in the WHERE clause.
+            bulk_size: Number of records to process in each batch (default 1000)
+            
+        Returns:
+            Dictionary with status, message, and total affected rows count.
+        """
+        if not data_list:
+            return {"status": 0, "message": "No data to update", "count": 0}
+
+        row_count = len(data_list)
+        first_row = data_list[0]
+        
+        # Validate keys exist in data
+        missing_keys = [k for k in key_columns if k not in first_row]
+        if missing_keys:
+            return {"status": -1, "message": f"Key columns {missing_keys} missing from data"}
+            
+        # Determine update columns (all keys in data that are not key_columns)
+        update_columns = [k for k in first_row.keys() if k not in key_columns]
+        
+        if not update_columns:
+            return {"status": 0, "message": "No columns to update found in data", "count": 0}
+
+        # Construct SQL
+        sql = self._construct_bulk_update_sql(table, update_columns, key_columns)
+        
+        total_affected = 0
+        cur = None
+        
+        total_affected = 0
+        cur = None
+        
+        try:
+            cur = self.get_cursor()
+            
+            # Prepare data sequence: list of tuples (update_vals..., key_vals...)
+            # We process this in batches to avoid huge memory usage for large lists
+            # We implement manual batching to preserve dict structure for value extraction
+            total_records = len(data_list)
+            
+            for i in range(0, total_records, bulk_size):
+                batch = data_list[i : i + bulk_size]
+                batch_params = []
+                
+                for row in batch:
+                    # Extract values in correct order: update columns, then key columns
+                    params = []
+                    # Add update values
+                    try:
+                        for col in update_columns:
+                             params.append(self._process_value(row.get(col)))
+                        # Add key values
+                        for col in key_columns:
+                             params.append(self._process_value(row.get(col)))
+                    except Exception as e:
+                        logger.error(f"Error processing row for bulk update: {row}. Error: {e}")
+                        continue
+                        
+                    batch_params.append(tuple(params))
+                
+                if batch_params:
+                    cur.executemany(sql, batch_params)
+                
+                    # Accumulate affected rows if supported
+                    row_count_val = getattr(cur, 'rowcount', -1)
+                    if row_count_val > 0:
+                        total_affected += row_count_val
+            
+            # If driver doesn't support rowcount for executemany, we can't be sure
+            if total_affected <= 0 and row_count > 0:
+                 # Many drivers (like psycopg) might return -1 or generic count for executemany
+                 # We'll just report 0 or unknown if not explicitly positive
+                 pass
+                 
+            message = f"BULK UPDATE succeeded. {total_affected} rows affected."
+            logger.info(message)
+            return {"status": 0, "message": message, "count": total_affected}
+
+        except Exception as e:
+            message = f'Failed to execute bulk update: {e}'
+            logger.error(message)
+            logger.error(traceback.format_exc())
+            return {"status": -1, "message": message}
+        finally:
+            if cur:
+                cur.close()
+
+    def _construct_bulk_update_sql(self, table, update_columns, key_columns):
+        """
+        Construct SQL for bulk_update.
+        Can be overridden by subclasses (e.g. OracleDb).
+        """
+        set_clause = ', '.join([f"{col} = {self.placeholder}" for col in update_columns])
+        where_clause = ' AND '.join([f"{col} = {self.placeholder}" for col in key_columns])
+        return f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
 
     def _update_constructor(self, table, data, where=None):
         """
@@ -1082,11 +1128,96 @@ class Db:
             sql = f.read()
             return self.query(sql=sql, arr_values=values)
 
-    def export_from_query(self, sql, csv_file, values=None, options=None):
+    def execute_script(self, sql_script, transaction=False):
         """
-        Export query results to a CSV file.
+        Execute a script containing multiple SQL statements separated by semicolons.
         
-        This method executes a SQL query and writes the results to a CSV file.
+        Args:
+            sql_script: String containing SQL statements separated by ;
+            transaction: If True, wraps execution in a transaction (autocommit=False)
+            
+        Returns:
+            Dictionary with status and message.
+        """
+        if not sql_script:
+            return {"status": 0, "message": "SQL script is empty"}
+
+        # Split by semicolon and filter empty strings
+        sqls = [s.strip() for s in sql_script.split(';') if s.strip()]
+        
+        if not sqls:
+            return {"status": 0, "message": "SQL script contains no executable statements"}
+
+        autocommit_was_enabled = True
+        success_count = 0
+        
+        try:
+            if transaction:
+                autocommit_was_enabled = self.get_autocommit()
+                self.set_autocommit(False)
+            
+            for sql in sqls:
+                # Reuse existing unescape logic if present in _prepare_sql, 
+                # but legacy checked unescape_current_keyword explicitly.
+                # Our self.execute() handles inject_current calls via _prepare_sql.
+                
+                # We can call self.execute() directly.
+                # Note: execute() returns a dict result.
+                
+                result = self.execute(sql)
+                if result['status'] != 0:
+                    # If any statement fails, we stop and rollback if in transaction
+                    if transaction:
+                        self.rollback()
+                    return {
+                        "status": -1, 
+                        "message": f"Script execution failed at statement {success_count + 1}: {result['message']}"
+                    }
+                success_count += 1
+            
+            if transaction:
+                self.commit()
+                
+            return {
+                "status": 0, 
+                "message": f"Script execution succeeded. {success_count} statements executed."
+            }
+
+        except Exception as e:
+            logger.error(f"Script execution exception: {e}")
+            logger.error(traceback.format_exc())
+            if transaction:
+                self.rollback()
+            return {"status": -1, "message": f"Script execution error: {e}"}
+            
+        finally:
+            if transaction:
+                self.set_autocommit(autocommit_was_enabled)
+
+    def run_script_from_file(self, sql_file, transaction=False):
+        """
+        Execute multiple SQL statements from a file.
+        
+        Args:
+            sql_file: Path to the SQL file
+            transaction: If True, wraps execution in a transaction
+            
+        Returns:
+            Dictionary with status and message
+        """
+        try:
+            with open(sql_file, 'r', encoding='utf-8') as f:
+                sql_script = f.read()
+            return self.execute_script(sql_script, transaction=transaction)
+        except Exception as e:
+            logger.error(f"Failed to read script file {sql_file}: {e}")
+            return {"status": -1, "message": f"Failed to read script file: {e}"}
+
+    def stream_to_csv(self, sql, csv_file, values=None, options=None):
+        """
+        Stream query results to a CSV file.
+        
+        This method executes a SQL query and writes the results to a CSV file using streaming.
         It properly handles None/Null values, escaping of special characters,
         and optionally includes a header row.
         
@@ -1100,6 +1231,8 @@ class Db:
             options: Optional dict with format control options:
                 - header: 'Y' to include header row with column names (default: 'Y')
                 - null_value: String to use for NULL values (default: '')
+                - quotechar: 'Y' to enforce double quotes on all strings
+                - abort_on_error: 'Y' (default) to abort on first error, 'N' to continue
                 
         Returns:
             Dictionary with:
@@ -1109,7 +1242,7 @@ class Db:
                 
         Example:
             # Export query results with header
-            result = db.export_from_query(
+            result = db.stream_to_csv(
                 "SELECT * FROM users WHERE status = %s",
                 "output/users.csv",
                 values=["active"],
@@ -1117,7 +1250,7 @@ class Db:
             )
             
             # Export without header
-            result = db.export_from_query(
+            result = db.stream_to_csv(
                 "SELECT name, email FROM users",
                 "output/users_no_header.csv",
                 options={"header": "N"}
@@ -1137,9 +1270,13 @@ class Db:
                 
                 for row_num, row, status in self.stream_query(sql, values):
                     if status != 0:
-                        message = f"Query error at row {row_num}"
-                        logger.error(message)
-                        return {"status": -1, "message": message, "row_count": row_count}
+                        if options.get('abort_on_error', 'Y') != 'N':
+                            message = f"Query error at row {row_num}"
+                            logger.error(message)
+                            return {"status": -1, "message": message, "row_count": row_count}
+                        else:
+                            logger.warning(f"Row {row_num} status is {status}, continue ...")
+                            continue
                     
                     # Write header on first row if requested
                     if not header_written:
@@ -1150,7 +1287,8 @@ class Db:
                     
                     # Write data row
                     null_value = options.get('null_value', '')
-                    escaped_row = data_utils.escape_csv_row(list(row.values()), null_value)
+                    quotechar = options.get('quotechar')
+                    escaped_row = data_utils.escape_csv_row(list(row.values()), null_value, quotechar)
                     f.write(','.join(escaped_row) + '\n')
                     row_count += 1
             

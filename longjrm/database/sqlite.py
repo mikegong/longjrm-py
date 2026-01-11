@@ -5,6 +5,7 @@ This module contains the SqliteDb class that extends the base Db class
 with SQLite-specific behavior for cursors and UPSERT operations.
 """
 import sqlite3
+import json
 from longjrm.database.db import Db
 
 
@@ -24,7 +25,32 @@ class SqliteDb(Db):
         # SQLite uses ? as placeholder
         self.placeholder = '?'
         # Enable row factory for dictionary-like access
+        # Enable row factory for dictionary-like access
         self.conn.row_factory = sqlite3.Row
+
+    def _process_value(self, value):
+        """
+        Process individual values for SQLite.
+        sqlite3 doesn't automatically convert lists to JSON/String,
+        raising errors like "type 'list' is not supported".
+        """
+        if isinstance(value, list):
+            return json.dumps(value, ensure_ascii=False)
+        return super()._process_value(value)
+
+    def _bulk_insert(self, table, data_list, return_columns=None, bulk_size=1000):
+        """
+        SQLite specific bulk insert with validation.
+        """
+        if data_list:
+            # Validate column consistency
+            first_row = data_list[0]
+            keys_set = set(first_row.keys())
+            for i, row in enumerate(data_list):
+                if set(row.keys()) != keys_set:
+                    raise ValueError(f"Inconsistent columns at row {i}")
+                    
+        return super()._bulk_insert(table, data_list, return_columns, bulk_size)
     
     def get_cursor(self):
         """Get a SQLite cursor with Row factory for dictionary-style access."""

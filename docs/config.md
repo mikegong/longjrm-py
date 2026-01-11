@@ -81,12 +81,23 @@ Set `JRM_SOURCE` to override default behavior:
     "type": "postgres", 
     "dsn": "postgres://${PG_USER}:${PG_PASS}@analytics.db:5432/warehouse"
   },
-  "mongodb-cache": {
-    "type": "mongodb+srv",
-    "host": "cluster0.mongodb.net",
-    "user": "${MONGO_USER}",
-    "password": "${MONGO_PASS}",
-    "database": "cache_db"
+  "oracle-erp": {
+    "type": "oracle",
+    "user": "scott",
+    "password": "tiger",
+    "dsn": "localhost:1521/XEPDB1",
+    "options": {
+        "thick_mode": false
+    }
+  },
+  "spark-cluster": {
+    "type": "spark",
+    "host": "spark-master",
+    "database": "default",
+    "options": {
+        "spark.app.name": "LongJRM-App",
+        "spark.executor.memory": "2g"
+    }
   }
 }
 ```
@@ -191,13 +202,6 @@ mysql://user:password@hostname:3306/database?charset=utf8mb4
 mysql+pymysql://user:pass@host/db?autocommit=true
 ```
 
-#### MongoDB
-```
-mongodb://user:pass@host:27017/database
-mongodb+srv://user:pass@cluster.mongodb.net/database
-mongodb://host1:27017,host2:27017,host3:27017/database?replicaSet=rs0
-```
-
 #### SQLite
 ```
 sqlite:///absolute/path/to/database.db
@@ -226,10 +230,13 @@ When DSN is not used, specify connection details individually:
 
 ### Supported Database Types
 
-- **MySQL**: `mysql`, `mysql+pymysql`
-- **PostgreSQL**: `postgres`, `postgresql`, `postgresql+psycopg2`
-- **MongoDB**: `mongodb`, `mongodb+srv`
+- **MySQL**: `mysql`, `mysql+pymysql`, `mariadb`
+- **PostgreSQL**: `postgres`, `postgresql`, `postgresql+psycopg`
 - **SQLite**: `sqlite`
+- **Oracle**: `oracle`
+- **DB2**: `db2`
+- **SQL Server**: `sqlserver`, `mssql`
+- **Spark SQL**: `spark`
 
 Additional drivers can be specified with `+driver` syntax (e.g., `mysql+pymysql`).
 
@@ -542,6 +549,34 @@ for name, db_config in config.databases().items():
 | `JRM_DB_NAME` | Database name | `production` |
 | `JRM_DB_OPTIONS` | Database options (JSON) | `{"sslmode": "require"}` |
 | `JRM_DB_DEFAULT` | Default database key | `primary` |
+
+### Database Config Structure
+
+Each database configuration entry supports the following fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Database type identifier (`postgres`, `mysql`, `oracle`, `db2`, `sqlserver`, `sqlite`, `spark`, etc.) |
+| `host` | string | No | Database host address (not needed for SQLite/Spark) |
+| `port` | integer | No | Database port number |
+| `user` | string | No | Authentication username |
+| `password` | string | No | Authentication password |
+| `database` | string | No | Database name (or file path for SQLite) |
+| `dsn` | string | No | Full connection string (optional alternative to individual fields) |
+| `options` | object | No | Database-specific options (e.g., SSL settings, charset) |
+
+### Supported Database Types
+
+LongJRM supports the following `type` values:
+
+- `postgres` (or `postgresql`)
+- `mysql` (or `mariadb`)
+- `oracle`
+- `db2`
+- `sqlserver` (or `mssql`)
+- `sqlite`
+- `spark`
+- Any generic DB-API 2.0 driver name
 
 ### Configuration Fields
 

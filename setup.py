@@ -2,16 +2,30 @@ from setuptools import setup, find_packages
 
 # Core dependencies (always required)
 install_requires = [
-    "PyMySQL>=1.1.0,<2.0.0",
+    "DBUtils>=3.0.3",
     "cryptography>=41.0.0",
-    "psycopg2-binary>=2.9.0,<3.0.0", 
-    "DBUtils>=3.0.3,<4.0.0",
 ]
 
 # Optional dependencies
 extras_require = {
-    "sqlalchemy": ["SQLAlchemy>=2.0.0,<3.0.0"],
-    "all": ["SQLAlchemy>=2.0.0,<3.0.0"],  # Install all optional dependencies
+    "mysql": ["PyMySQL>=1.1.0"],
+    "postgres": ["psycopg[binary]>=3.1.0"],
+    "oracle": ["oracledb>=2.0.0"],
+    "sqlserver": ["pyodbc>=4.0.39"],
+    "db2": ["ibm_db>=3.2.0"],
+    "spark": ["pyspark>=3.3.0", "delta-spark>=2.3.0"],
+    "sqlalchemy": ["SQLAlchemy>=2.0.0"],
+    "all": [
+        "PyMySQL>=1.1.0",
+        "psycopg[binary]>=3.1.0",
+        "oracledb>=2.0.0",
+        "pyodbc>=4.0.39",
+        "ibm_db>=3.2.0",
+        "ibm-db-sa>=0.4.0",
+        "pyspark>=3.3.0",
+        "delta-spark>=2.3.0",
+        "SQLAlchemy>=2.0.0"
+    ],
 }
 
 setup(
@@ -29,13 +43,12 @@ setup(
     },
     install_requires=install_requires,
     extras_require=extras_require,
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
+
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",

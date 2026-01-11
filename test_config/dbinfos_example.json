@@ -15,8 +15,53 @@
         "port": 5432,
         "database": "test"
     },
+    "db2-test": {
+        "type": "db2",
+        "host": "localhost",
+        "user": "",
+        "password": "",
+        "port": 25000,
+        "database": "sample"
+    },
+    "oracle-test": {
+        "type": "oracle",
+        "host": "localhost",
+        "user": "",
+        "password": "",
+        "port": 1521,
+        "database": "XEPDB1"
+    },
+    "sqlserver-test": {
+        "type": "sqlserver",
+        "host": "localhost",
+        "user": "",
+        "password": "",
+        "port": 1433,
+        "database": "sample"
+    },
     "sqlite-test": {
         "type": "sqlite",
         "database": "test.db"
+    },
+    "spark-test": {
+        "type": "spark",
+        "database": "default",
+        "host": "",
+        "port": "",
+        "user": "",
+        "password": "",
+        "options": {
+            "master": "local[*]",
+            "app_name": "longjrm-spark-test",
+            "enable_delta": true
+        }
+    },
+    "spark-docker": {
+        "type": "spark",
+        "options": {
+            "master": "spark://spark-master:7077",
+            "app_name": "longjrm-docker-test",
+            "enable_delta": false
+        }
     }
 }

@@ -18,8 +18,6 @@ Make sure your test_config/dbinfos.json file contains valid database configurati
 """
 
 import logging
-import json
-import datetime
 import sys
 import os
 

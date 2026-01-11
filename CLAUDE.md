@@ -2,9 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
-
-**longjrm-py** is a JSON Relational Mapping (JRM) library for Python that provides a hybrid adapter for connecting object-oriented programming with various database types. The library bridges the gap between OOP and databases that don't naturally support object-oriented paradigms, offering a more adaptable alternative to traditional ORMs.
+##- **Project Name**: longjrm-py
+- **Version**: 0.1.0
+- **Description**: A generic JSON Relational Mapping (JRM) library for Python 3.10+ that wraps SQL CRUD operations via DB-API 2.0.
+- **Key Features**:
+    - Database-oriented CRUD (insert, select, update, delete, merge)
+    - **Connector Factory** architecture for dynamic DB support
+    - JSON-based data and query structures
+    - Connection pooling (via DBUtils 2/3 or SQLAlchemy)
+    - **Streaming** support for queries and transactional inserts
+    - **Bulk Load** and **Partition** management (DB2/Postgres specific)
+    - 12-Factor App configuration compliance
+- **Supported Databases**: Postgres, MySQL/MariaDB, Oracle, DB2, SQL Server, SQLite, Spark, and generic DB-API 2.0 drivers.
 
 ### Project Philosophy
 - Eliminate data models inside applications
@@ -14,24 +23,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-### Core Components
-
-- **`longjrm.database.db.Db`**: Core JRM class providing complete CRUD operations via database APIs
-- **`longjrm.connection.pool.Pool`**: Multi-database connection pool management with thread-safe operations
-- **`longjrm.connection.dbconn.DatabaseConnection`**: Database connection abstraction layer
-- **`longjrm.config.config`**: Environment and database configuration loader
-- **`longjrm.config.runtime`**: Runtime configuration management
-- **`longjrm.connection.driver_registry`**: Database driver registration system
-- **`longjrm.connection.dsn_parts_helper`**: DSN parsing and connection utilities
-- **`longjrm.utils.file_loader`**: File loading utilities for configuration files
-
-### Database Support
-
 The library supports multiple database types through a unified interface:
 - **MySQL** (via PyMySQL) 
-- **PostgreSQL** (via psycopg2)
+- **PostgreSQL** (via psycopg v3)
+- **Oracle** (via oracledb)
+- **DB2** (via ibm_db_dbi)
+- **SQL Server** (via pyodbc)
+- **SQLite** (via sqlite3)
+- **Spark SQL** (via pyspark)
 
-**Extensible Architecture**: Easily supports additional databases implementing Python DB-API 2.0 (PEP 249) including SQLite, Oracle, SQL Server, IBM DB2, Firebird, and others. Database driver mappings are defined in `longjrm/connection/driver_map.json`.
+**Extensible Architecture**: Easily supports additional databases implementing Python DB-API 2.0 (PEP 249). Database driver mappings are defined in `longjrm/connection/driver_map.json`.
 
 ## CRUD Operations API
 
@@ -271,21 +272,23 @@ with pool.client() as client:
 
 ## Development Commands
 
-### Package Management
+### Install Dependencies
 ```bash
-pip install -r requirements.txt    # Install dependencies
-pip install -e .                   # Development mode install
-python setup.py sdist bdist_wheel  # Build package
+pip install -r requirements.txt
+pip install -e .[all]
 ```
 
-### Testing
+### Run Tests
 ```bash
-# Run comprehensive test suites
-python longjrm/tests/insert_test.py      # Test insert operations
-python longjrm/tests/delete_test.py      # Test delete operations
-python longjrm/tests/merge_test.py       # Test merge operations
-python longjrm/tests/connection_test.py  # Test connections
-python longjrm/tests/placeholder_test.py # Test placeholder handling
+# Run all tests
+python -m unittest discover longjrm/tests *_test.py
+
+# Run specific tests
+python longjrm/tests/connection_test.py
+python longjrm/tests/pool_test.py
+python longjrm/tests/select_test.py
+python longjrm/tests/insert_test.py
+python longjrm/tests/spark_test.py
 ```
 
 ## Configuration
@@ -332,20 +335,34 @@ longjrm/
 │   ├── config.py              # Main configuration loader  
 │   └── runtime.py             # Runtime configuration management
 ├── connection/                 # Database connection management
-│   ├── dbconn.py              # Database connection abstraction
+│   ├── connectors.py          # Base and database-specific connectors
 │   ├── driver_map.json        # Database driver mappings
 │   ├── driver_registry.py     # Driver registration system
 │   ├── dsn_parts_helper.py    # DSN parsing utilities
 │   └── pool.py                # Connection pooling implementation
 ├── database/                   # Database operations
-│   └── db.py                  # Core JRM database class with CRUD operations
+│   ├── __init__.py            # get_db() factory function
+│   ├── db.py                  # Base Db class with CRUD operations
+│   ├── postgres.py            # PostgreSQL-specific operations
+│   ├── mysql.py               # MySQL/MariaDB-specific operations
+│   ├── sqlite.py              # SQLite-specific operations
+│   ├── oracle.py              # Oracle-specific operations
+│   ├── db2.py                 # DB2-specific operations
+│   ├── sqlserver.py           # SQL Server-specific operations
+│   ├── spark.py               # Spark SQL-specific operations
+│   ├── generic.py             # Generic DB-API 2.0 fallback
+│   └── placeholder_handler.py # SQL placeholder utilities
 ├── tests/                      # Comprehensive test suite
 │   ├── insert_test.py         # Insert operation tests
 │   ├── update_test.py         # Update operation tests
 │   ├── delete_test.py         # Delete operation tests
+│   ├── merge_test.py          # Merge/upsert operation tests
 │   ├── connection_test.py     # Connection testing
-│   └── pool_test.py           # Pool testing
+│   ├── pool_test.py           # Pool testing
+│   └── spark_test.py          # Spark SQL testing
 └── utils/                      # Utility modules
+    ├── sql.py                 # SQL utilities
+    ├── data.py                # Data processing utilities
     └── file_loader.py         # File loading utilities
 ```
 
@@ -359,19 +376,27 @@ Each database operation requires a "client" object containing:
 
 ## Package Information
 
-- **Version**: 0.0.2
+- **Version**: 0.1.0
 - **Author**: Mike Gong at LONGINFO
 - **Package**: longjrm
+- **Python**: >= 3.10
 
 ### Dependencies
 
+**Core Dependencies:**
+- DBUtils >= 3.0.3 (Connection pooling)
+- cryptography >= 41.0.0 (Security)
+
 **Database Drivers (installed based on database needs):**
-- PyMySQL ~= 1.1.0 (MySQL support)
-- psycopg2-binary ~= 2.9.0 (PostgreSQL support)
+- psycopg[binary] >= 3.1.0 (PostgreSQL support)
+- PyMySQL >= 1.1.0 (MySQL support)
+- oracledb >= 2.0.0 (Oracle support)
+- pyodbc >= 4.0.39 (SQL Server support)
+- ibm_db >= 3.2.0 (DB2 support)
+- pyspark >= 3.3.0 (Spark support)
 
 **Connection Pooling:**
-- SQLAlchemy ~= 2.0.0 (Advanced connection pooling backend)
-- DBUtils ~= 3.0.3 (Lightweight connection pooling backend)
+- SQLAlchemy >= 2.0.0 (Advanced connection pooling backend)
 
 ## Development Guidelines
 

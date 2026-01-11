@@ -27,7 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.connection.pool import Pool, PoolBackend
 from longjrm.database import get_db
+from longjrm.tests import test_utils
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -56,39 +58,15 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         
         # Create test table if it doesn't exist
         try:
-            if db.database_type in ['postgres', 'postgresql']:
-                # PostgreSQL with unique constraint for merge testing
-                create_table_sql = """
-                CREATE TABLE IF NOT EXISTS test_merge_users (
-                    id SERIAL PRIMARY KEY,
-                    email VARCHAR(100) UNIQUE NOT NULL,
-                    name VARCHAR(100),
-                    age INTEGER,
-                    department VARCHAR(50),
-                    status VARCHAR(20) DEFAULT 'active',
-                    metadata JSONB,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            else:  # MySQL
-                create_table_sql = """
-                CREATE TABLE IF NOT EXISTS test_merge_users (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    email VARCHAR(100) UNIQUE NOT NULL,
-                    name VARCHAR(100),
-                    age INTEGER,
-                    department VARCHAR(50),
-                    status VARCHAR(20) DEFAULT 'active',
-                    metadata JSON,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY unique_email (email)
-                )
-                """
+             # Drop table first for clean state
+            test_utils.drop_table_silently(db, "test_merge_users")
             
-            db.execute(create_table_sql)
-            print("SUCCESS: Test merge table created/verified")
+            create_table_sql = test_utils.get_create_table_sql(db.database_type, "test_merge_users")
+            if create_table_sql:
+                db.execute(create_table_sql)
+                print("SUCCESS: Test merge table created/verified")
         except Exception as e:
-            print(f"WARNING: Could not create test table (may already exist): {e}")
+            print(f"WARNING: Could not create test table (may already exist or other error): {e}")
         
         # Clean up any existing test data
         try:
@@ -199,31 +177,13 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         print("\n--- Test 4: Multi-column Key Merge ---")
         # First create a table with composite key
         try:
-            if db.database_type in ['postgres', 'postgresql']:
-                create_composite_sql = """
-                CREATE TABLE IF NOT EXISTS test_user_roles (
-                    user_id INTEGER NOT NULL,
-                    role_id INTEGER NOT NULL,
-                    permissions TEXT,
-                    granted_by VARCHAR(100),
-                    granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, role_id)
-                )
-                """
-            else:  # MySQL
-                create_composite_sql = """
-                CREATE TABLE IF NOT EXISTS test_user_roles (
-                    user_id INTEGER NOT NULL,
-                    role_id INTEGER NOT NULL,
-                    permissions TEXT,
-                    granted_by VARCHAR(100),
-                    granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, role_id)
-                )
-                """
+            # Drop table first
+            test_utils.drop_table_silently(db, "test_user_roles")
             
-            db.execute(create_composite_sql)
-            print("SUCCESS: Test user_roles table created/verified")
+            create_composite_sql = test_utils.get_create_table_sql(db.database_type, "test_user_roles")
+            if create_composite_sql:
+                db.execute(create_composite_sql)
+                print("SUCCESS: Test user_roles table created/verified")
         except Exception as e:
             print(f"WARNING: Could not create user_roles table: {e}")
         
@@ -313,16 +273,12 @@ def test_error_handling():
     configure(cfg)
     
     # Test with first available database
-    available_dbs = ["postgres-test", "mysql-test"]
+    # Test with first available database
+    available_dbs = test_utils.get_active_test_configs(cfg)
     db_key = None
     
-    for test_db in available_dbs:
-        try:
-            db_cfg = cfg.require(test_db)
-            db_key = test_db
-            break
-        except:
-            continue
+    if available_dbs:
+        db_key = available_dbs[0][0] # Just take the first one
     
     if not db_key:
         print("No SQL database available for error handling tests")
@@ -363,14 +319,14 @@ if __name__ == "__main__":
     print("=== JRM Merge Function Test Suite ===")
     
     # Test database and backend combinations
-    test_combinations = [
-        ("postgres-test", PoolBackend.DBUTILS, test_sql_database),
-        ("postgres-test", PoolBackend.SQLALCHEMY, test_sql_database),
-        ("mysql-test", PoolBackend.DBUTILS, test_sql_database),
-        ("mysql-test", PoolBackend.SQLALCHEMY, test_sql_database)
-    ]
-    
+    # Test database and backend combinations
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+    
+    test_combinations = []
+    active_configs = test_utils.get_active_test_configs(cfg)
+    
+    for db_key, backend in active_configs:
+         test_combinations.append((db_key, backend, test_sql_database))
     
     # Test all available database/backend combinations, abort on first failure
     combinations_tested = 0
@@ -378,6 +334,11 @@ if __name__ == "__main__":
         try:
             # Check if database configuration exists
             db_cfg = cfg.require(db_key)
+            
+            # Skip Spark databases (they require separate spark_test.py)
+            if db_cfg.type == 'spark':
+                print(f"Skipping {db_key} (Spark databases are run in spark_test.py)")
+                continue
             
             # Run all tests for this database/backend combination
             print(f"\n>>> Running tests with {db_key} using {backend.value} backend")

@@ -1,18 +1,56 @@
 # longjrm-py
 
-**longjrm-py** is a JSON Relational Mapping (JRM) library for Python that provides a hybrid adapter for connecting object-oriented programming with various database types. The library bridges the gap between OOP and databases that don't naturally support object-oriented paradigms, offering a more adaptable alternative to traditional ORMs.
+**longjrm-py** is a JSON Relational Mapping (JRM) library for Python 3.10+ that provides a hybrid adapter for connecting object-oriented programming with various database types. The library bridges the gap between OOP and databases that don't naturally support object-oriented paradigms, offering a more adaptable alternative to traditional ORMs.
+
+## Quickstart
+
+```python
+import os
+from longjrm.database import get_db
+from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.config.config import DatabaseConfig
+
+# 1. Configure and create pool (load password from environment variable)
+config = DatabaseConfig(
+    type="postgres",
+    host="localhost",
+    user="app",
+    password=os.environ["DB_PASSWORD"],
+    database="mydb"
+)
+pool = Pool.from_config(config, PoolBackend.DBUTILS)
+
+# 2. Use database with context manager
+with pool.client() as client:
+    db = get_db(client)
+    
+    # Insert
+    db.insert("users", {"name": "Alice", "email": "alice@example.com"})
+    
+    # Select
+    result = db.select("users", ["id", "name"], {"name": "Alice"})
+    print(result["data"])  # [{"id": 1, "name": "Alice"}]
+
+# 3. Cleanup
+pool.dispose()
+```
 
 ## Overview
 
-Introducing JRM (JSON Relational Mapping) - a dynamic and high-efficiency library designed to revolutionize the way databases are populated. Recognizing that the majority of databases don't naturally support object-oriented programming, JRM steps in as a game-changing solution, bridging the gap with finesse and efficiency.
+**JRM (JSON Relational Mapping)** is designed to build a direct adapter between applications and databases via JSON data instead of OOP objects. The core philosophy:
 
-The core philosophy is to eliminate data models inside applications and work directly with database models. The input and output of database operations are JSON data instead of OOP objects. This innovative approach circumvents the limitations often encountered with traditional Object-Relational Mapping (ORM) in non-object-oriented databases, reduces backend development cost, and increases performance.
+- **Eliminate application data models** - Work directly with database models as the only data source
+- **JSON in, JSON out** - Input and output of database operations are JSON data instead of OOP objects
+- **Leverage the database engine** - Generate required data structures through the database engine, which is optimized for data computation and outperforms most customized applications
+- **Reduce development cost** - This programming paradigm can reduce development cost tremendously
+
+This innovative approach circumvents the limitations often encountered with traditional Object-Relational Mapping (ORM) in non-object-oriented databases.
 
 ## Key Features
 
 - **Multi-Database Support**: Unified interface for MySQL, PostgreSQL, and more databases that support DB-API 2.0
 - **JSON-Based Operations**: Direct JSON input/output for database operations
-- **Connection Pooling**: Efficient connection management with DBUtils-based pooling and SQLAlchemy pooling
+- **Connection Pooling**: Efficient connection management with DBUtils, SQLAlchemy, and Spark pooling backends
 - **Configuration Management**: Flexible configuration via JSON files or environment variables
 - **Lightweight Design**: Minimal overhead compared to traditional ORMs
 - **Database Agnostic**: Consistent API across different database types
@@ -24,22 +62,51 @@ The core philosophy is to eliminate data models inside applications and work dir
 
 ## Architecture
 
-### Core Components
+`longjrm` has been refactored to use a **Connector Factory** pattern, replacing the legacy `DatabaseConnection` class. This allows for:
 
-- **`longjrm.database.db.Db`**: Core JRM class that wraps CRUD SQL statements via database APIs
-- **`longjrm.connection.pool.Pool`**: Multi-database connection pool management
-- **`longjrm.connection.dbconn.DatabaseConnection`**: Database connection abstraction layer
-- **`longjrm.config.config`**: Environment and database configuration loader
-- **`longjrm.utils`**: Library-standard utilities including logging
+1.  **Strict Configuration**: `DatabaseConfig` explicitly defines connection parameters.
+2.  **Dynamic Connector Selection**: The factory selects the appropriate `BaseConnector` subclass (e.g., `PostgresConnector`, `OracleConnector`) or falls back to a **Generic Connector** for any DB-API 2.0 compliant driver.
+3.  **Connection Pooling**: Seamless integration with `SQLAlchemy` and `DBUtils` pooling backends via the `Pool` class.
 
-### Supported Databases
+## Supported Databases
 
-- **MySQL** (via PyMySQL)
-- **PostgreSQL** (via psycopg2)
+`longjrm` supports a wide range of databases "out of the box":
 
-**Extensible Database Support**: The library is designed to easily support additional databases that implement the Python DB-API 2.0 specification. New database types can be added by updating the driver mappings and implementing the appropriate connection logic.
+-   **PostgreSQL** (`psycopg` v3)
+-   **MySQL / MariaDB** (`pymysql`)
+-   **Oracle** (`oracledb`)
+-   **IBM Db2** (`ibm_db_dbi`)
+-   **SQL Server** (`pyodbc`)
+-   **SQLite** (`sqlite3`)
+-   **Apache Spark** (`pyspark` SQL) — Uses singleton `SparkSession` which natively manages concurrency; exposed as a pooling backend for unified API
+-   **Generic DB-API**: Any other database with a standard Python DB-API 2.0 driver.
 
-Database type mappings are defined in `longjrm/connection/driver_map.json`.
+## Features
+
+### Core Operations
+-   **CRUD**: Simple `insert`, `select`, `update`, `delete`, `merge` (upsert) methods.
+-   **Querying**: `query()` for standard fetches, with automatic dictionary row conversion.
+-   **Transactions**: `commit`, `rollback`, and context managers (`with pool.transaction() as tx:`).
+
+### Advanced Operations
+
+#### Streaming
+Memory-efficient operations for large datasets using Python generators:
+-   **`stream_query()`**: Yields rows one-by-one to avoid loading everything into RAM.
+-   **`stream_query_batch()`**: Yields data in configurable batches (buckets).
+-   **Tx Stream Operations**: `stream_insert()`, `stream_update()`, `stream_merge()` handle massive data movement with periodic auto-commits (e.g., every 10k rows).
+-   **CSV Export**: `stream_to_csv()` streams query results directly to a file.
+
+#### Bulk Loading
+High-performance bulk operations:
+-   **Bulk Load**: High-performance data loading using native methods (`COPY` for Postgres, `LOAD` for DB2).
+-   **Data Export**: universal `stream_to_csv` for efficient file export and DB2-specific `EXPORT` support.
+-   **Partition Management**: DB2-specific tools for partition attach/detach/add.
+-   **Streaming**: Memory-efficient row-by-row processing for massive datasets.
+
+#### Partition Management (DB2)
+Specialized support for DB2 partition maintenance:
+-   `add_partition()`, `attach_partition()`, `detach_partition()`, `drop_detached_partition()`.
 
 ## Installation
 
@@ -86,8 +153,10 @@ python setup.py sdist bdist_wheel
 
 ### Dependency Overview
 
-- **Core dependencies**: PyMySQL, psycopg2-binary, DBUtils (always installed)
+- **Core dependencies**: DBUtils, cryptography (always installed)
 - **Optional dependencies**: 
+  - `mysql`: PyMySQL ~= 1.1.0 for MySQL support
+  - `postgres`: psycopg[binary] >= 3.1.0 for PostgreSQL support
   - `sqlalchemy`: SQLAlchemy ~= 2.0.0 for advanced connection pooling features
 
 ## Configuration
@@ -221,25 +290,53 @@ with pool.client() as client:
 
     # Delete operation
     db.delete("users", conditions)
-
-# Manual connection management (for transaction control)
-client = pool.get_client()
-try:
-    db = Db(client)
-    
-    # Begin transaction
-    db.execute("BEGIN")
-    
-    # Multiple operations in same transaction
-    db.insert("orders", {"user_id": 1, "amount": 100.00})
-    db.update("users", {"last_order": "`CURRENT_TIMESTAMP`"}, {"id": 1})
-    
-    # Commit transaction
-    db.execute("COMMIT")
-    
-finally:
-    pool.close_client(client)
 ```
+
+## Usage Examples
+
+### Basic Connection & Query
+
+```python
+from longjrm import Pool, get_config
+
+# 1. Initialize Pool (loads config automatically from env/files)
+#    or explicitly: Pool.from_config(DatabaseConfig(type='postgres', ...))
+cfg = get_config()
+pool = Pool.from_config(cfg.require('mydb'), pool_backend='dbutils')
+
+# 2. Use client context
+with pool.client() as client:
+    db = get_db(client)
+    
+    # Select
+    result = db.select("users", ["id", "name"], {"active": True})
+    print(result['data'])
+    
+    # Insert
+    db.insert("users", {"name": "Alice", "active": True})
+```
+
+### Streaming Export
+
+```python
+# Stream query results to CSV with low memory usage
+db.stream_to_csv(
+    sql="SELECT * FROM large_audit_logs", 
+    csv_file="audit_export.csv",
+    options={"header": "Y", "batch_size": 5000}
+)
+```
+
+## Dependencies
+
+-   **Core**: `DBUtils`, `cryptography`
+-   **Drivers (Optional)**:
+    -   `psycopg` (Postgres)
+    -   `pymysql` (MySQL)
+    -   `oracledb` (Oracle)
+    -   `pyodbc` (SQL Server)
+    -   `ibm_db` (DB2)
+    -   `pyspark` (Spark)
 
 ### Database Client Architecture
 
@@ -247,7 +344,7 @@ Each database operation requires a "client" object containing:
 - `conn`: Database connection object
 - `database_type`: Type identifier (mysql, postgres, etc.)
 - `database_name`: Logical database name
-- `db_lib`: Python database driver such as psycopg2, pymysql
+- `db_lib`: Python database driver such as psycopg, pymysql
 
 ## Testing
 
@@ -288,14 +385,18 @@ Test scripts expect database configurations in `test_config/dbinfos.json`. Copy 
 ### Run Tests
 
 ```bash
-# Run individual test files
-python longjrm/tests/pool_test.py
-python longjrm/tests/connection_test.py
-python longjrm/tests/insert_test.py
+# Recommended: Run as module from project root
+python -m longjrm.tests.select_test
+python -m longjrm.tests.connection_test
 
-# Or run from project root without installation (for quick testing)
-cd longjrm-py
-python longjrm/tests/insert_test.py
+# Filter for specific database (e.g. Oracle, DB2, SQLServer)
+# This uses dynamic discovery from test_config/dbinfos.json
+python -m longjrm.tests.connection_test --db=oracle
+python -m longjrm.tests.select_test --db=db2
+python -m longjrm.tests.transaction_test --db=sqlserver
+
+# Alternatively, if installed in editable mode (pip install -e .):
+python longjrm/tests/select_test.py --db=postgres
 ```
 
 ### Test Coverage
@@ -349,19 +450,27 @@ The library follows Python logging best practices:
 
 ## Dependencies
 
+### Core Dependencies
+- DBUtils >= 3.0.3 (Connection pooling)
+- cryptography >= 41.0.0 (Security)
+
 ### Database Drivers (installed based on your database needs)
-- PyMySQL ~= 1.1.0 (MySQL support)
-- psycopg2-binary ~= 2.9.0 (PostgreSQL support)
+- psycopg[binary] >= 3.1.0 (PostgreSQL support)
+- PyMySQL >= 1.1.0 (MySQL support)
+- oracledb >= 2.0.0 (Oracle support)
+- pyodbc >= 4.0.39 (SQL Server support)
+- ibm_db >= 3.2.0 (DB2 support)
+- pyspark >= 3.3.0 (Spark support)
 
 ### Connection Pooling
-- SQLAlchemy ~= 2.0.0 (Advanced connection pooling backend)
-- DBUtils ~= 3.0.3 (Lightweight connection pooling backend)
+- SQLAlchemy >= 2.0.0 (Advanced connection pooling backend)
 
 ## License
 
-This project is developed by Mike Gong at LONGINFO.
+This project is licensed under the [MIT License](LICENSE).
+
+Developed by Mike Gong at LONGINFO.
 
 ## Documentation
 
-This documentation has been compiled by Claude Sonnet 4 model via Claude Code, providing comprehensive coverage of the longjrm-py library's features, architecture, and usage patterns.
-
+All the documentation was compiled with assistance from Gemini 3.5 Pro, Claude Opus 4.5, and Claude Sonnet 4.

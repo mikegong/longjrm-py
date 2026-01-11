@@ -8,7 +8,6 @@ from typing import Mapping
 from longjrm.connection.dsn_parts_helper import dsn_to_parts, type_from_dsn
 
 
-
 class JrmConfigurationError(ValueError): ...
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

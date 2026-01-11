@@ -13,6 +13,12 @@ Tests cover:
 """
 
 import logging
+import sys
+import os
+
+# Add the project root to Python path for development testing
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+
 try:
     import pytest
     HAS_PYTEST = True
@@ -22,7 +28,9 @@ except ImportError:
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.connection.pool import Pool, PoolBackend
 from longjrm.database import get_db
+from longjrm.tests import test_utils
 
 # Configure logging
 logging.basicConfig(
@@ -44,37 +52,25 @@ class TestPoolTransaction:
         configure(cls.cfg)
 
         # Setup pools for different databases and backends
+        # Setup pools for different databases and backends
         cls.pools = {}
+        
+        active_configs = test_utils.get_active_test_configs(cls.cfg)
+        
+        for db_key, backend in active_configs:
+            try:
+                db_cfg = cls.cfg.require(db_key)
+                if db_cfg.type == 'spark':
+                    logger.info(f"Skipping {db_key} (Spark does not support standard RDBMS transactions)")
+                    continue
 
-        # PostgreSQL pools - both backends
-        try:
-            pg_cfg = cls.cfg.require("postgres-test")
-            cls.pools['postgres-dbutils'] = Pool.from_config(pg_cfg, PoolBackend.DBUTILS)
-            logger.info("Created PostgreSQL DBUTILS pool")
-        except Exception as e:
-            logger.warning(f"Could not create PostgreSQL DBUTILS pool: {e}")
-
-        try:
-            pg_cfg = cls.cfg.require("postgres-test")
-            cls.pools['postgres-sqlalchemy'] = Pool.from_config(pg_cfg, PoolBackend.SQLALCHEMY)
-            logger.info("Created PostgreSQL SQLAlchemy pool")
-        except Exception as e:
-            logger.warning(f"Could not create PostgreSQL SQLAlchemy pool: {e}")
-
-        # MySQL pools - both backends
-        try:
-            mysql_cfg = cls.cfg.require("mysql-test")
-            cls.pools['mysql-dbutils'] = Pool.from_config(mysql_cfg, PoolBackend.DBUTILS)
-            logger.info("Created MySQL DBUTILS pool")
-        except Exception as e:
-            logger.warning(f"Could not create MySQL DBUTILS pool: {e}")
-
-        try:
-            mysql_cfg = cls.cfg.require("mysql-test")
-            cls.pools['mysql-sqlalchemy'] = Pool.from_config(mysql_cfg, PoolBackend.SQLALCHEMY)
-            logger.info("Created MySQL SQLAlchemy pool")
-        except Exception as e:
-            logger.warning(f"Could not create MySQL SQLAlchemy pool: {e}")
+                backend_name = "sqlalchemy" if backend == PoolBackend.SQLALCHEMY else "dbutils"
+                pool_key = f"{db_key}-{backend_name}"
+                
+                cls.pools[pool_key] = Pool.from_config(db_cfg, backend)
+                logger.info(f"Created {pool_key} pool")
+            except Exception as e:
+                logger.warning(f"Could not create pool for {db_key} ({backend}): {e}")
     
     @classmethod
     def teardown_class(cls):
@@ -94,26 +90,11 @@ class TestPoolTransaction:
                     db = get_db(client)
 
                     # Drop and recreate test table
-                    if pool_key.startswith('mysql'):
-                        db.execute("DROP TABLE IF EXISTS test_transaction", [])
-                        db.execute("""
-                            CREATE TABLE test_transaction (
-                                id INT AUTO_INCREMENT PRIMARY KEY,
-                                name VARCHAR(100),
-                                value INT,
-                                description VARCHAR(255)
-                            )
-                        """, [])
-                    else:  # PostgreSQL
-                        db.execute("DROP TABLE IF EXISTS test_transaction", [])
-                        db.execute("""
-                            CREATE TABLE test_transaction (
-                                id SERIAL PRIMARY KEY,
-                                name VARCHAR(100),
-                                value INT,
-                                description VARCHAR(255)
-                            )
-                        """, [])
+                    test_utils.drop_table_silently(db, "test_transaction")
+                    
+                    create_sql = test_utils.get_create_table_sql(db.database_type, "test_transaction")
+                    if create_sql:
+                        db.execute(create_sql, [])
 
                     logger.info(f"Setup test table for {pool_key}")
             except Exception as e:
@@ -125,7 +106,7 @@ class TestPoolTransaction:
             try:
                 with pool.client() as client:
                     db = get_db(client)
-                    db.execute("DROP TABLE IF EXISTS test_transaction", [])
+                    test_utils.drop_table_silently(db, "test_transaction")
                     logger.info(f"Cleaned up test table for {pool_key}")
             except Exception as e:
                 logger.error(f"Error cleaning up test table for {pool_key}: {e}")
@@ -485,6 +466,8 @@ def run_tests():
             logger.error(f"  Error: {e}")
             import traceback
             traceback.print_exc()
+            logger.error("Aborting subsequent tests due to failure.")
+            break
     
     # Teardown
     TestPoolTransaction.teardown_class()

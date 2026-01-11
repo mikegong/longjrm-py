@@ -27,7 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
+
 from longjrm.database import get_db
+from longjrm.tests import test_utils
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -43,40 +45,13 @@ def setup_test_data(db, db_key):
     print(f"Setting up test data for {db_key}...")
     
     try:
-        if db.database_type in ['postgres', 'postgresql']:
-            # Create test table for PostgreSQL
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS test_users (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(50) DEFAULT 'active',
-                metadata JSONB,
-                tags TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        elif db.database_type == 'mysql':
-            # Create test table for MySQL
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS test_users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(50) DEFAULT 'active',
-                metadata JSON,
-                tags TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            )
-            """
+
+        # Get appropriate create table SQL
+        create_table_sql = test_utils.get_create_table_sql(db.database_type, "test_users")
         
-        if db.database_type in ['mysql', 'postgres', 'postgresql']:
+        if create_table_sql:
             # Drop existing table to ensure correct structure
-            db.execute("DROP TABLE IF EXISTS test_users")
+            test_utils.drop_table_silently(db, "test_users")
             db.execute(create_table_sql)
             print("SUCCESS: Test table created/verified")
             
@@ -374,8 +349,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key].dispose()
     print(f"Connection closed for {db_key}")
 
-    pools[db_key].dispose()
-    print(f"Connection closed for {db_key}")
+
 
 
 def test_error_handling():
@@ -386,16 +360,12 @@ def test_error_handling():
     configure(cfg)
     
     # Test with first available database
-    available_dbs = ["postgres-test", "mysql-test"]
+
+    available_dbs = test_utils.get_active_test_configs(cfg)
     db_key = None
     
-    for test_db in available_dbs:
-        try:
-            db_cfg = cfg.require(test_db)
-            db_key = test_db
-            break
-        except:
-            continue
+    if available_dbs:
+        db_key = available_dbs[0][0] # Just take the first one
     
     if not db_key:
         print("No SQL database available for error handling tests")
@@ -454,21 +424,23 @@ if __name__ == "__main__":
     print("Testing delete operations with abort-on-failure behavior")
     
     # Test database and backend combinations
-    test_combinations = [
-        ("postgres-test", PoolBackend.DBUTILS, test_sql_database),
-        ("postgres-test", PoolBackend.SQLALCHEMY, test_sql_database),
-        ("mysql-test", PoolBackend.DBUTILS, test_sql_database),
-        ("mysql-test", PoolBackend.SQLALCHEMY, test_sql_database)
-    ]
-    
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
     
+    test_combinations = []
+    active_configs = test_utils.get_active_test_configs(cfg)
+    
+    for db_key, backend in active_configs:
+         test_combinations.append((db_key, backend, test_sql_database))
+
     # Test all available database/backend combinations, abort on first failure
     combinations_tested = 0
     for db_key, backend, test_function in test_combinations:
         try:
             # Check if database configuration exists
             db_cfg = cfg.require(db_key)
+            if db_cfg.type == 'spark':
+                print(f"Skipping {db_key} (Spark databases are run in spark_test.py)")
+                continue
             
             # Run all tests for this database/backend combination
             print(f"\n>>> Running tests with {db_key} using {backend.value} backend")

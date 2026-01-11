@@ -83,7 +83,16 @@ class PlaceholderHandler:
             return sql, []
         
         # If params is already positional (list/tuple), return as-is
+        # If params is already positional (list/tuple), return as-is, BUT check for placeholder mismatch
         if isinstance(params, (list, tuple)):
+            # Simple conversion support for common positional patterns (%s <-> ?)
+            if target_placeholder == '?' and '?' not in sql:
+                # Convert %s to ?
+                sql = cls.POSITIONAL_PATTERNS['percent_s'].sub('?', sql)
+            elif target_placeholder == '%s' and '%s' not in sql:
+                # Convert ? to %s
+                sql = cls.POSITIONAL_PATTERNS['question'].sub('%s', sql)
+                
             return sql, list(params)
         
         # Handle dict params - could be named placeholders

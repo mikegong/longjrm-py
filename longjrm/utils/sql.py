@@ -138,7 +138,13 @@ def conditions_to_string(conditions):
 # These functions parse JSON-style where conditions into SQL WHERE clauses.
 # Moved from Db class to enable reuse across the codebase.
 
-def simple_condition_parser(condition, param_index, placeholder):
+# =============================================================================
+# WHERE Clause Parser Functions
+# =============================================================================
+# These functions parse JSON-style where conditions into SQL WHERE clauses.
+# Moved from Db class to enable reuse across the codebase.
+
+def simple_condition_parser(condition, param_index, placeholder, inline=False):
     """
     Parse simple condition format: {column: value}
     
@@ -146,6 +152,7 @@ def simple_condition_parser(condition, param_index, placeholder):
         condition: Dictionary with single key-value pair
         param_index: Current parameter index
         placeholder: SQL placeholder string ('%s', '?', etc.)
+        inline: If True, inline values directly into SQL
         
     Returns:
         Tuple of (arr_cond, arr_values, param_index)
@@ -162,10 +169,15 @@ def simple_condition_parser(condition, param_index, placeholder):
         if check_current_keyword(clean_value):
             # CURRENT keyword cannot be put in placeholder
             arr_cond.append(f"{column} = {unescape_current_keyword(clean_value)}")
+        elif inline:
+             escaped_val = clean_value.replace("'", "''")
+             arr_cond.append(f"{column} = '{escaped_val}'")
         else:
             param_index += 1
             arr_values.append(clean_value)
             arr_cond.append(f"{column} = {placeholder}")
+    elif inline:
+        arr_cond.append(f"{column} = {value}")
     else:
         param_index += 1
         arr_values.append(value)
@@ -174,7 +186,7 @@ def simple_condition_parser(condition, param_index, placeholder):
     return arr_cond, arr_values, param_index
 
 
-def regular_condition_parser(condition, param_index, placeholder):
+def regular_condition_parser(condition, param_index, placeholder, inline=False):
     """
     Parse regular condition format: {column: {operator1: value1, operator2: value2}}
     
@@ -182,6 +194,7 @@ def regular_condition_parser(condition, param_index, placeholder):
         condition: Dictionary with column key and operator-value dict
         param_index: Current parameter index
         placeholder: SQL placeholder string
+        inline: If True, inline values directly into SQL
         
     Returns:
         Tuple of (arr_cond, arr_values, param_index)
@@ -196,17 +209,35 @@ def regular_condition_parser(condition, param_index, placeholder):
             clean_value = value.replace("''", "'")
             if check_current_keyword(clean_value):
                 arr_cond.append(f"{column} {operator} {unescape_current_keyword(clean_value)}")
+            elif inline:
+                escaped_val = clean_value.replace("'", "''")
+                arr_cond.append(f"{column} {operator} '{escaped_val}'")
             else:
                 param_index += 1
                 arr_values.append(clean_value)
                 arr_cond.append(f"{column} {operator} {placeholder}")
         elif isinstance(value, list) and operator.upper() == 'IN':
             # Special handling for IN operator with list values
-            placeholders = ', '.join([placeholder] * len(value))
-            arr_cond.append(f"{column} {operator} ({placeholders})")
-            for list_item in value:
-                param_index += 1
-                arr_values.append(list_item)
+            if inline:
+                if not value: # empty list
+                     arr_cond.append("1=0") # false condition
+                else:
+                    item_strs = []
+                    for list_item in value:
+                        if isinstance(list_item, str):
+                             escaped_item = list_item.replace("'", "''")
+                             item_strs.append(f"'{escaped_item}'")
+                        else:
+                             item_strs.append(str(list_item))
+                    arr_cond.append(f"{column} {operator} ({', '.join(item_strs)})")
+            else:
+                placeholders = ', '.join([placeholder] * len(value))
+                arr_cond.append(f"{column} {operator} ({placeholders})")
+                for list_item in value:
+                    param_index += 1
+                    arr_values.append(list_item)
+        elif inline:
+             arr_cond.append(f"{column} {operator} {value}")
         else:
             param_index += 1
             arr_values.append(value)
@@ -215,7 +246,7 @@ def regular_condition_parser(condition, param_index, placeholder):
     return arr_cond, arr_values, param_index
 
 
-def comprehensive_condition_parser(condition, param_index, placeholder):
+def comprehensive_condition_parser(condition, param_index, placeholder, inline=False):
     """
     Parse comprehensive condition format: {column: {"operator": ">", "value": value, "placeholder": "N"}}
     
@@ -223,6 +254,7 @@ def comprehensive_condition_parser(condition, param_index, placeholder):
         condition: Dictionary with column key and operator/value/placeholder dict
         param_index: Current parameter index
         placeholder: SQL placeholder string
+        inline: Global inline preference (overridden by local placeholder param)
         
     Returns:
         Tuple of (arr_cond, arr_values, param_index)
@@ -233,20 +265,26 @@ def comprehensive_condition_parser(condition, param_index, placeholder):
     value = cond_obj['value']
     arr_cond = []
     arr_values = []
+    
+    # Local placeholder override takes precedence over global inline
+    # If placeholder='N', use inline. If placeholder='Y', use placeholder.
+    # If placeholder not set, default 'Y' -> check inline arg.
+    should_inline = cond_obj.get('placeholder', 'N' if inline else 'Y') == 'N'
 
     if isinstance(value, str):
         clean_value = value.replace("''", "'")
         if check_current_keyword(clean_value):
             arr_cond.append(f"{column} {operator} {unescape_current_keyword(clean_value)}")
         else:
-            if cond_obj.get('placeholder', 'Y') == 'N':
-                arr_cond.append(f"{column} {operator} '{clean_value}'")
+            if should_inline:
+                escaped_val = clean_value.replace("'", "''")
+                arr_cond.append(f"{column} {operator} '{escaped_val}'")
             else:
                 param_index += 1
                 arr_values.append(clean_value)
                 arr_cond.append(f"{column} {operator} {placeholder}")
     else:
-        if cond_obj.get('placeholder', 'Y') == 'N':
+        if should_inline:
             arr_cond.append(f"{column} {operator} {value}")
         else:
             param_index += 1
@@ -256,45 +294,32 @@ def comprehensive_condition_parser(condition, param_index, placeholder):
     return arr_cond, arr_values, param_index
 
 
-def parse_single_condition(condition, param_index, placeholder):
+def parse_single_condition(condition, param_index, placeholder, inline=False):
     """
     Route a single condition to the appropriate parser.
-    
-    Args:
-        condition: Dictionary with condition
-        param_index: Current parameter index
-        placeholder: SQL placeholder string
-        
-    Returns:
-        Tuple of (arr_cond, arr_values, param_index)
     """
     column = list(condition.keys())[0]
     value = condition[column]
     
     if not isinstance(value, dict):
-        return simple_condition_parser(condition, param_index, placeholder)
+        return simple_condition_parser(condition, param_index, placeholder, inline)
     else:
         keys = value.keys()
         if "operator" in keys and "value" in keys and "placeholder" in keys:
-            return comprehensive_condition_parser(condition, param_index, placeholder)
+            return comprehensive_condition_parser(condition, param_index, placeholder, inline)
         else:
-            return regular_condition_parser(condition, param_index, placeholder)
+            return regular_condition_parser(condition, param_index, placeholder, inline)
 
 
-def operator_condition_parser(condition, param_index, placeholder):
+def operator_condition_parser(condition, param_index, placeholder, inline=False):
     """
     Parse logical operator conditions (MongoDB-style).
-    
-    Supports:
-        - $and: [{cond1}, {cond2}] -> (cond1 AND cond2)
-        - $or: [{cond1}, {cond2}] -> (cond1 OR cond2)
-        - $not: {column: value} -> NOT (column = value)
-        - $nin: {column: [values]} -> column NOT IN (values)
     
     Args:
         condition: Dictionary with $operator key
         param_index: Current parameter index
         placeholder: SQL placeholder string
+        inline: If True, inline values directly into SQL
         
     Returns:
         Tuple of (arr_cond, arr_values, param_index)
@@ -313,7 +338,7 @@ def operator_condition_parser(condition, param_index, placeholder):
         sub_conditions = []
         for sub_cond in operand:
             for col, val in sub_cond.items():
-                sub_result = parse_single_condition({col: val}, param_index, placeholder)
+                sub_result = parse_single_condition({col: val}, param_index, placeholder, inline)
                 sub_conditions.extend(sub_result[0])
                 arr_values.extend(sub_result[1])
                 param_index = sub_result[2]
@@ -328,7 +353,7 @@ def operator_condition_parser(condition, param_index, placeholder):
         sub_conditions = []
         for sub_cond in operand:
             for col, val in sub_cond.items():
-                sub_result = parse_single_condition({col: val}, param_index, placeholder)
+                sub_result = parse_single_condition({col: val}, param_index, placeholder, inline)
                 sub_conditions.extend(sub_result[0])
                 arr_values.extend(sub_result[1])
                 param_index = sub_result[2]
@@ -342,7 +367,7 @@ def operator_condition_parser(condition, param_index, placeholder):
         
         sub_conditions = []
         for col, val in operand.items():
-            sub_result = parse_single_condition({col: val}, param_index, placeholder)
+            sub_result = parse_single_condition({col: val}, param_index, placeholder, inline)
             sub_conditions.extend(sub_result[0])
             arr_values.extend(sub_result[1])
             param_index = sub_result[2]
@@ -357,30 +382,39 @@ def operator_condition_parser(condition, param_index, placeholder):
         for col, values in operand.items():
             if not isinstance(values, list):
                 raise ValueError(f"$nin values must be a list, got {type(values)}")
-            placeholders = ', '.join([placeholder] * len(values))
-            arr_cond.append(f"{col} NOT IN ({placeholders})")
-            for v in values:
-                param_index += 1
-                arr_values.append(v)
+            
+            if inline:
+                if not values:
+                     arr_cond.append("1=1") # NOT IN empty set is always true? No, typically "col NOT IN ()" syntax isn't standard or empty set means true. 
+                     # Wait, col NOT IN (empty) is True. col IN (empty) is False.
+                item_strs = []
+                for v in values:
+                    if isinstance(v, str):
+                        escaped_v = v.replace("'", "''")
+                        item_strs.append(f"'{escaped_v}'")
+                    else:
+                        item_strs.append(str(v))
+                arr_cond.append(f"{col} NOT IN ({', '.join(item_strs)})")
+            else:
+                placeholders = ', '.join([placeholder] * len(values))
+                arr_cond.append(f"{col} NOT IN ({placeholders})")
+                for v in values:
+                    param_index += 1
+                    arr_values.append(v)
     else:
         raise ValueError(f"Unknown operator: {operator}")
     
     return arr_cond, arr_values, param_index
 
 
-def where_parser(where, placeholder):
+def where_parser(where, placeholder, inline=False):
     """
     Parse JSON where conditions into SQL WHERE clause.
-    
-    Supports multiple condition formats:
-    1. Simple: {column: value}
-    2. Regular: {column: {operator: value}}
-    3. Comprehensive: {column: {"operator": ">", "value": val, "placeholder": "N"}}
-    4. Logical: {"$and": [...], "$or": [...], "$not": {...}, "$nin": {...}}
     
     Args:
         where: Dictionary of conditions
         placeholder: SQL placeholder string ('%s', '?', etc.)
+        inline: If True, inline values directly into SQL (default False)
         
     Returns:
         Tuple of (where_clause_sql, values_list)
@@ -397,15 +431,15 @@ def where_parser(where, placeholder):
         
         # Check for logical operators first (keys starting with $)
         if column.startswith('$'):
-            arr_cond, arr_values, param_index = operator_condition_parser(condition, param_index, placeholder)
+            arr_cond, arr_values, param_index = operator_condition_parser(condition, param_index, placeholder, inline)
         elif not isinstance(where[column], dict):
-            arr_cond, arr_values, param_index = simple_condition_parser(condition, param_index, placeholder)
+            arr_cond, arr_values, param_index = simple_condition_parser(condition, param_index, placeholder, inline)
         elif isinstance(where[column], dict):
             keys = where[column].keys()
             if "operator" in keys and "value" in keys and "placeholder" in keys:
-                arr_cond, arr_values, param_index = comprehensive_condition_parser(condition, param_index, placeholder)
+                arr_cond, arr_values, param_index = comprehensive_condition_parser(condition, param_index, placeholder, inline)
             else:
-                arr_cond, arr_values, param_index = regular_condition_parser(condition, param_index, placeholder)
+                arr_cond, arr_values, param_index = regular_condition_parser(condition, param_index, placeholder, inline)
         else:
             raise Exception('Invalid where condition')
         parsed_cond.extend(arr_cond)
