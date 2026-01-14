@@ -1066,7 +1066,7 @@ While maintaining compatibility, LongJRM optimizes for each database type:
 ```python
 # Automatic cursor type selection
 if db.database_type in ['postgres', 'postgresql']:
-    # Uses psycopg2.extras.RealDictCursor for dict results
+    # Uses psycopg.extras.RealDictCursor for dict results
     pass
 elif db.database_type == 'mysql':
     # Uses pymysql.cursors.DictCursor for dict results

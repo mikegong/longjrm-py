@@ -372,7 +372,7 @@ Each database operation requires a "client" object containing:
 - `conn`: Database connection/pool object
 - `database_type`: Type identifier (mysql, postgres, etc.)  
 - `database_name`: Logical database name
-- `db_lib`: Python database driver such as psycopg2, pymysql
+- `db_lib`: Python database driver such as psycopg, pymysql
 
 ## Package Information
 

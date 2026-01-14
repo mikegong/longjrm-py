@@ -248,7 +248,7 @@ with pool.client() as client:
     #     "conn": <database_connection_object>,
     #     "database_type": "postgres",
     #     "database_name": "mydb", 
-    #     "db_lib": "psycopg2"
+    #     "db_lib": "psycopg"
     # }
     
     # Access the raw connection
@@ -522,7 +522,7 @@ def test_real_database_connection():
 ### Common Issues
 
 1. **"No module named" errors**:
-   - Install required database drivers: `pip install psycopg2-binary pymysql`
+   - Install required database drivers: `pip install psycopg-binary pymysql`
    - Check driver mapping in `driver_map.json`
 
 2. **Connection timeout errors**:
