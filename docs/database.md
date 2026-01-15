@@ -40,33 +40,154 @@ db = Db(client)
 4. **Update Operations** - Conditional record updates with flexible WHERE conditions
 5. **Delete Operations** - Conditional record deletion with comprehensive filtering
 6. **Merge Operations** - UPSERT operations with key-based conflict resolution
-7. **GraphQL-Style Querying** - Single function comprehensive table queries with complex condition support
+7. **GraphQL-Style Querying** - Single function comprehensive table queries
+8. **Bulk Load Operations** - Native database bulk loading (COPY, ADMIN_CMD)
+9. **Streaming Operations** - Memory-efficient data processing and export
+10. **Partition Management** - DB2-specific partition maintenance methods
+
+## Advanced Operations
+
+### Bulk Load Operations
+
+LongJRM supports native bulk loading for supported databases (PostgreSQL, DB2) and optimized batch inserts for others.
+
+#### PostgreSQL Bulk Load
+
+Uses PostgreSQL's `COPY` command for high-speed data loading.
+
+```python
+# 1. Load from file
+load_info = {
+    "source": "/path/to/data.csv",
+    "format": "csv",
+    "delimiter": ",",
+    "header": True
+}
+db.bulk_load("target_table", load_info)
+
+# 2. Load from memory (via file-like object)
+import io
+csv_data = io.StringIO("col1,col2\n1,test\n2,test2")
+db.bulk_load("target_table", {"source": csv_data})
+```
+
+#### DB2 Bulk Load
+
+Uses DB2's `ADMIN_CMD` with `LOAD` for efficient loading.
+
+```python
+load_info = {
+    "source": "data.del",
+    "filetype": "DEL",
+    "operation": "REPLACE",  # or INSERT
+    "warningcount": 100
+}
+db.bulk_load("target_table", load_info)
+```
+
+### Partition Management (DB2 Specific)
+
+LongJRM provides methods to manage DB2 table partitions.
+
+```python
+# Add a new partition
+db.add_partition(
+    table="sales", 
+    partition_name="p2024jan", 
+    boundary="STARTING '2024-01-01' ENDING '2024-01-31'"
+)
+
+# Detach a partition into a separate table
+db.detach_partition("sales", "p2023dec", "sales_archive_2023dec")
+
+# Attach a table as a new partition
+db.attach_partition("sales", "p2023dec", "STARTING '2023-12-01' ENDING '2023-12-31'", "sales_archive_2023dec")
+```
+
+### 3. Data Export
+
+LongJRM provides robust data export capabilities, allowing you to stream query results directly to files efficiently.
+
+#### Universal CSV Export (`stream_to_csv`)
+
+The `stream_to_csv` method is the core function for exporting data. It uses streaming to handle large datasets with minimal memory footprint.
+
+```python
+# Export query results with header (default)
+result = db.stream_to_csv(
+    sql="SELECT * FROM users WHERE status = %s",
+    csv_file="output/users.csv",
+    values=["active"],
+    options={
+        "header": "Y",           # 'Y' to include header (default), 'N' for no header
+        "null_value": "",        # String to use for NULLs (default: empty string)
+        "quotechar": '"',        # Optional char to force quoting
+        "abort_on_error": "Y"    # Abort export if row streaming fails
+    }
+)
+
+if result['status'] == 0:
+    print(f"Exported {result['row_count']} rows")
+```
+
+#### DB2-Specific Export (`export_admin_cmd`)
+
+For DB2 databases, you can also use the native `EXPORT` utility via `ADMIN_CMD` for high-performance server-side exports.
+
+```python
+# DB2 Native Export
+result = db.export_admin_cmd({
+    "source": "SELECT * FROM huge_table",
+    "target": "/server/path/export.ixf",
+    "filetype": "IXF"
+})
+```
+
+### 4. Streaming Operations
+
+Streaming operations allow you to process large result sets row-by-row without loading the entire dataset into memory.
+
+```python
+# Stream Insert: Process large dataset with periodic commits
+def data_generator():
+    for i in range(1000000):
+        yield {"id": i, "data": "value"}
+
+# Insert generator data, committing every 10k rows
+db.stream_insert(data_generator(), "large_table", commit_count=10000)
+
+#### Stream Query Results
+
+```python
+# Stream rows one by one
+for row_num, row_data, status in db.stream_query("SELECT * FROM big_table"):
+    if status == 0:
+        process(row_data)
+    else:
+        log_error(f"Row {row_num} failed")
+```
 
 ## Database Client Integration
 
 ### Setting Up Database Operations
 
 ```python
-from longjrm.config.runtime import get_config, require_db
+from longjrm.config.runtime import get_config
 from longjrm.connection.pool import Pool, PoolBackend
-from longjrm.database.db import Db
+from longjrm.database import get_db
 
-# Get database configuration
-db_config = require_db("primary")
+# 1. Initialize Pool from configuration
+cfg = get_config()
+pool = Pool.from_config(cfg.require("primary"), PoolBackend.SQLALCHEMY)
 
-# Create connection pool
-if db_config.type in ['mongodb', 'mongodb+srv']:
-    pool = Pool.from_config(db_config, PoolBackend.MONGODB)
-else:
-    pool = Pool.from_config(db_config, PoolBackend.SQLALCHEMY)
-
-# Get connection client and perform operations
+# 2. Use client context
 with pool.client() as client:
-    # Initialize database operations
-    db = Db(client)
+    # 3. Get Db instance (automatically selects correct subclass)
+    db = get_db(client)
     
-    # Perform operations
-    result = db.select(table="users", columns=["id", "name", "email"])
+    # 4. Perform operations
+    result = db.select(table="users", columns=["id", "name"])
+
 pool.dispose()
 ```
 
@@ -77,9 +198,9 @@ The `Db` class expects a client dictionary with the following structure:
 ```python
 client = {
     "conn": <database_connection_object>,
-    "database_type": "postgres",  # postgres, mysql, mongodb, etc.
+    "database_type": "postgres",  # postgres, mysql, sqlite, etc.
     "database_name": "mydb",
-    "db_lib": "psycopg2"  # Database driver library
+    "db_lib": "psycopg"  # Database driver library
 }
 ```
 
@@ -138,12 +259,44 @@ result = db.query(
 result = db.query("SELECT * FROM products WHERE price BETWEEN %s AND %s", [10.0, 100.0])
 ```
 
-#### MongoDB
+
+
+### Stream Query Batching (Generic)
+
+Process large result sets in memory-efficient batches.
 
 ```python
-# MongoDB queries use dictionary format
-# This is handled internally when using select() method
-# Direct query() calls for MongoDB use collection operations
+sql = "SELECT * FROM large_table WHERE status = %s"
+# Yields batches of 1000 rows
+for total_rows, batch, status in db.stream_query_batch(sql, ["active"], batch_size=1000):
+    if status == 0:
+        process_batch(batch) # process list of 1000 dicts
+        print(f"Processed {len(batch)} rows. Total so far: {total_rows}")
+    else:
+        print("Error encountered in stream")
+```
+
+### Script Execution
+
+LongJRM supports executing raw SQL scripts containing multiple statements (e.g., from a `.sql` file).
+
+#### Execute Script String
+
+```python
+sql_script = """
+    UPDATE users SET status = 'inactive' WHERE last_login < '2023-01-01';
+    DELETE FROM sessions WHERE expired = 1;
+"""
+# Execute script (statements split by ';')
+# transaction=True ensures atomicity (rollback on failure)
+db.execute_script(sql_script, transaction=True)
+```
+
+#### Execute Script File
+
+```python
+# Execute directly from a file
+db.run_script_from_file("path/to/schema_update.sql", transaction=True)
 ```
 
 ## Select Operations
@@ -160,12 +313,6 @@ result = db.select(table="users")
 result = db.select(
     table="users", 
     columns=["id", "name", "email"]
-)
-
-# MongoDB collection query
-result = db.select(
-    table="users",  # Collection name for MongoDB
-    columns=["_id", "name", "email"]
 )
 ```
 
@@ -297,22 +444,119 @@ result = db.select(
 )
 ```
 
-#### MongoDB Select
+#### MySQL Select
 
 ```python
-# MongoDB collection queries
+# MySQL with full-text search
 result = db.select(
-    table="products",  # Collection name
-    columns=["_id", "name", "price", "tags"],
+    table="articles",
+    columns=["id", "title", "content"],
     where={
-        "price": {"$gte": 10, "$lte": 100},
-        "tags": {"$in": ["electronics", "gadgets"]},
-        "status": "available"
-    },
-    options={
-        "limit": 20,
-        "order_by": ["price DESC"]
+        "status": "published",
+        "MATCH(title, content) AGAINST": {
+            "operator": "MATCH",
+            "value": "'database tutorial'",
+            "placeholder": "N"
+        }
     }
+)
+```
+
+### DB2 Specific Operations
+
+LongJRM provides specialized support for IBM DB2, including MERGE statements, Admin Commands, and Partition Management.
+
+#### DB2 Merge (Upsert)
+
+DB2 does not support `INSERT ... ON CONFLICT`. Instead, LongJRM overrides `merge` to use DB2's `MERGE INTO` syntax.
+
+```python
+data = {"id": 1, "name": "Updated Name", "role": "admin"}
+# Merges data into 'users' table matching on 'id'
+# Updates existing records or inserts new ones
+db.merge(table="users", data=data, key_columns=["id"])
+
+# Bulk Merge
+bulk_data = [{"id": 1, "val": "A"}, {"id": 2, "val": "B"}]
+db.merge(table="users", data=bulk_data, key_columns=["id"])
+```
+
+#### DB2 Admin Commands
+
+Execute DB2 administrative stored procedures via `SYSPROC.ADMIN_CMD`.
+
+```python
+# Load Data
+load_info = {
+    "source": "data.del",
+    "filetype": "DEL",
+    "target": "my_table",
+    "operation": "REPLACE",
+    "warningcount": 10
+}
+db.load_admin_cmd(load_info)
+
+# Export Data
+export_info = {
+    "source": "select * from my_table",
+    "target": "data.ixf",
+    "filetype": "IXF"
+}
+db.export_admin_cmd(export_info)
+
+# Generic Admin Command
+db.admin_cmd(("reorg table my_table",))
+```
+
+#### DB2 Partition Management
+
+Manage table partitions directly.
+
+```python
+# Add Partition
+db.add_partition("sales", "p2024", "starting '2024-01-01' ending '2024-12-31'")
+
+# Attach Partition
+db.attach_partition("sales", "p2023", "starting '2023-01-01' ending '2023-12-31'", "sales_2023_staging")
+
+# Detach Partition
+db.detach_partition("sales", "p_old", "sales_archive_table")
+
+# Check Partition Status
+status = db.check_partition("myschema", "sales", "p2024")
+
+# Drop Detached Partition (Safe Drop)
+# Checks if partition is fully detached before dropping the table
+db.drop_detached_partition("myschema", "sales_archive_table")
+```
+
+#### DB2 Runstats
+
+Execute `RUNSTATS` to update catalog statistics for query optimization.
+
+```python
+# Default runstats (distribution and indexes all, 10% sampling)
+db.runstats("my_table")
+
+# Custom runstats command
+db.runstats("my_table", "runstats on table my_table and indexes all")
+```
+
+### Bulk Update (High Performance)
+For updating many records at once with different values, use `bulk_update`. This uses `executemany` for performance.
+
+```python
+updates = [
+    {"id": 1, "status": "active", "score": 10},
+    {"id": 2, "status": "inactive", "score": 20},
+    {"id": 3, "status": "pending", "score": 0}
+]
+
+# Update 'users' table, using 'id' as the key to match records
+db.bulk_update(
+    table="users",
+    data_list=updates,
+    key_columns=["id"]
 )
 ```
 
@@ -654,47 +898,6 @@ where = {
         "placeholder": "Y"                                 # Parameter binding control
     }
 }
-```
-
-### MongoDB GraphQL-Style Queries
-
-For MongoDB, LongJRM translates GraphQL-like conditions to native MongoDB query operators:
-
-```python
-# MongoDB collection query with GraphQL-style syntax
-result = db.select(
-    table="products",  # Collection name
-    columns=["_id", "name", "price", "tags", "metadata"],
-    where={
-        "price": {"$gte": 100, "$lte": 1000},             # MongoDB range operators
-        "tags": {"$in": ["electronics", "gadgets"]},      # Array membership
-        "metadata.featured": True,                         # Nested field access
-        "stock.quantity": {"$gt": 0}                      # Nested object conditions
-    },
-    options={
-        "limit": 50,
-        "order_by": ["price DESC", "rating DESC"]
-    }
-)
-
-# Complex MongoDB aggregation-style query
-analytics_result = db.select(
-    table="user_activities",
-    columns=["user_id", "activity_type", "timestamp", "metadata"],
-    where={
-        "timestamp": {
-            "$gte": "2024-01-01T00:00:00Z",
-            "$lte": "2024-12-31T23:59:59Z"
-        },
-        "activity_type": {"$in": ["purchase", "view", "search"]},
-        "metadata.campaign_id": {"$exists": True}
-    },
-    options={
-        "limit": 1000,
-        "order_by": ["timestamp DESC"]
-    }
-)
-```
 
 ### GraphQL Resolver Pattern
 
@@ -854,9 +1057,6 @@ pg_result = get_active_users(pg_db)
 
 # Works with MySQL  
 mysql_result = get_active_users(mysql_db)
-
-# Works with MongoDB
-mongo_result = get_active_users(mongo_db)
 ```
 
 ### Database-Specific Optimizations
@@ -866,13 +1066,10 @@ While maintaining compatibility, LongJRM optimizes for each database type:
 ```python
 # Automatic cursor type selection
 if db.database_type in ['postgres', 'postgresql']:
-    # Uses psycopg2.extras.RealDictCursor for dict results
+    # Uses psycopg.extras.RealDictCursor for dict results
     pass
 elif db.database_type == 'mysql':
     # Uses pymysql.cursors.DictCursor for dict results
-    pass
-elif db.database_type in ['mongodb', 'mongodb+srv']:
-    # Uses MongoDB find() operations with native dict results
     pass
 ```
 

@@ -104,7 +104,7 @@ raw_conn.set_autocommit(True)  # Restore default state
 **Transaction Flow:**
 ```python
 # SQLAlchemy connections are raw DB-API connections
-raw_conn = client['conn']  # Raw connection (psycopg2, PyMySQL, etc.)
+raw_conn = client['conn']  # Raw connection (psycopg, PyMySQL, etc.)
 raw_conn.set_autocommit(False)  # Start transaction
 # ... transaction operations ...
 raw_conn.commit()  # Commit transaction

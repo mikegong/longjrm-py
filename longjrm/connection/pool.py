@@ -5,69 +5,14 @@ from enum import Enum
 from contextlib import contextmanager
 from longjrm.config.config import DatabaseConfig
 from longjrm.config.runtime import get_config
-from longjrm.connection.dbconn import DatabaseConnection, set_autocommit, set_isolation_level
+from longjrm.connection.connectors import get_connector_class, unwrap_connection as _unwrap_connection
 from longjrm.connection.driver_registry import load_driver_map, sa_minimal_url
-from longjrm.database.db import Db
+from longjrm.database import get_db
 
 
 logger = logging.getLogger(__name__)
 
 
-def _unwrap_connection(conn):
-    """
-    Unwrap pooling library wrappers to get the actual DB-API connection.
-
-    Known nesting scenarios:
-    1. DBUtils PooledDB: PooledDedicatedDBConnection._con -> SteadyDBConnection._con -> actual
-    2. DBUtils SharedDB: SharedDBConnection.con -> SteadyDBConnection._con -> actual
-    3. SQLAlchemy: ConnectionFairy.dbapi_connection -> actual
-
-    Args:
-        conn: A connection object that may be wrapped by pooling libraries
-
-    Returns:
-        The actual DB-API connection object
-    """
-    actual_conn = conn
-    conn_type = type(actual_conn).__name__
-    conn_module = type(actual_conn).__module__
-    logger.debug(f"Unwrapping connection: {actual_conn}")
-    
-    # Scenario 1: DBUtils PooledDB - PooledDedicatedDBConnection
-    if 'dbutils' in conn_module.lower() and conn_type == 'PooledDedicatedDBConnection':
-        if hasattr(actual_conn, '_con'):
-            actual_conn = actual_conn._con  # -> SteadyDBConnection
-            # Continue to unwrap SteadyDBConnection
-            if hasattr(actual_conn, '_con'):
-                logger.debug(f"Unwrapping SharedDBConnection: {actual_conn}")
-                actual_conn = actual_conn._con  # -> actual connection
-        return actual_conn
-
-    # Scenario 2: DBUtils SharedDB - SharedDBConnection
-    if 'dbutils' in conn_module.lower() and conn_type == 'SharedDBConnection':
-        if hasattr(actual_conn, 'con'):
-            actual_conn = actual_conn.con  # -> SteadyDBConnection
-            # Continue to unwrap SteadyDBConnection
-            if hasattr(actual_conn, '_con'):
-                actual_conn = actual_conn._con  # -> actual connection
-        return actual_conn
-
-    # Scenario 3: Direct SteadyDBConnection (if pool returns it directly)
-    if 'dbutils' in conn_module.lower() and conn_type == 'SteadyDBConnection':
-        if hasattr(actual_conn, '_con'):
-            actual_conn = actual_conn._con  # -> actual connection
-        return actual_conn
-
-    # Scenario 4: SQLAlchemy ConnectionFairy
-    if 'sqlalchemy' in conn_module.lower():
-        if hasattr(actual_conn, 'dbapi_connection'):
-            actual_conn = actual_conn.dbapi_connection  # -> actual connection
-        elif hasattr(actual_conn, 'connection'):
-            actual_conn = actual_conn.connection  # -> actual connection
-        return actual_conn
-
-    # No wrapper detected, return as-is (already actual connection)
-    return actual_conn
 
 
 class TransactionContext:
@@ -102,7 +47,6 @@ class TransactionContext:
 class PoolBackend(str, Enum):
     SQLALCHEMY = "sqlalchemy"
     DBUTILS = "dbutils"
-    MONGODB = "mongodb"
     
     
 class _Backend:
@@ -111,7 +55,6 @@ class _Backend:
         self.database_module = driver_info.dbapi if driver_info else None
 
     def _get_client(self): raise NotImplementedError
-    def close_client(self): raise NotImplementedError
     def dispose(self): raise NotImplementedError
     def get_config(self) -> DatabaseConfig: return self._cfg
 
@@ -128,6 +71,10 @@ class _SABackend(_Backend):
         # Real DB-API connections are created by dbconn via creator=...
         url = sa_minimal_url(db_cfg.type, override_driver=(db_cfg.options or {}).get("sa_driver"))
 
+        # Ensure driver is loaded/patched (e.g. DB2 DLLs) before SQLAlchemy tries to use it
+        from longjrm.connection.driver_registry import load_dbapi_module
+        load_dbapi_module(db_cfg.type)
+
         opts: dict[str, Any] = {
             "pool_size": jrm_cfg.max_pool_size,
             "pool_timeout": jrm_cfg.pool_timeout,
@@ -138,9 +85,15 @@ class _SABackend(_Backend):
         if sa_opts:
             opts.update(sa_opts)
 
+        if 'sqlite' in db_cfg.type.lower():
+            # SQLite default SingletonThreadPool doesn't support pool_size/pool_timeout
+            opts.pop("pool_size", None)
+            opts.pop("pool_timeout", None)
+
         self._engine = create_engine(
             url,
-            creator=lambda: DatabaseConnection(self._cfg).connect(),  # dbconn owns DSN vs parts
+            # Fresh connector per checkout -> no shared mutable state
+            creator=lambda: get_connector_class(self._cfg.type)(self._cfg).connect(),
             **opts,
         )
 
@@ -149,7 +102,7 @@ class _SABackend(_Backend):
     def _get_client(self):
         fairy = self._engine.raw_connection()  # Returns _ConnectionFairy proxy
         # Set autocommit on the actual connection (unwrap all pooling wrappers)
-        set_autocommit(_unwrap_connection(fairy), True)
+        get_connector_class(self._cfg.type).set_dbapi_autocommit(_unwrap_connection(fairy), True)
         logger.debug(f"Got SQLAlchemy connection for {self._cfg.type} '{self._cfg.database}'")
         return {"conn": fairy,
                 "database_type": self._cfg.type,
@@ -185,19 +138,42 @@ class _DBUtilsBackend(_Backend):
         if dbutils_opts:
             opts.update(dbutils_opts)
 
-        # Fresh DatabaseConnection per checkout -> no shared mutable state
-        # Create ONE DatabaseConnection instance to use as factory
-        self._db_connection = DatabaseConnection(self._cfg)
-        
-        # Use bound method as creator (more efficient than lambda)
-        self._pool = PooledDB(creator=self._db_connection.connect, **opts)
-        
+        # Single connector instance - PooledDB calls connect() when it needs new connections
+        self._connector = get_connector_class(self._cfg.type)(self._cfg)
+
+        # Custom wrapper to allow attaching metadata for DBUtils inspection
+        def creator_func():
+            return self._connector.connect()
+
+        # Try to import metadata via registry (handles fixes automatically)
+        from longjrm.connection.driver_registry import load_dbapi_module
+        if self.database_module:
+            mod = load_dbapi_module(self._cfg.type)  # Pass db_type for lookup
+            
+            if mod:
+                # 1. Get exceptions via 'failures' option (official DBUtils arg)
+                exceptions = (mod.InterfaceError, mod.DatabaseError)
+                opts['failures'] = exceptions
+                
+                # 2. Get threadsafety
+                threadsafety = getattr(mod, 'threadsafety', None)
+                
+                # Attach threadsafety to creator function (DBUtils inspection)
+                if threadsafety is not None:
+                    creator_func.threadsafety = threadsafety
+                    
+                logger.debug(f"Attached metadata from '{self.database_module}' to pool creator")
+            else:
+                logger.warning(f"Could not load metadata for '{self.database_module}'")
+
+        self._pool = PooledDB(creator=creator_func, **opts)
+
         logger.info(f"Created DBUtils pool for {self._cfg.type} '{self._cfg.database}'")
 
     def _get_client(self):
         wrapper = self._pool.connection()  # May return various DBUtils wrapper types
         # Set autocommit on the actual connection (unwrap all pooling wrappers)
-        set_autocommit(_unwrap_connection(wrapper), True)
+        get_connector_class(self._cfg.type).set_dbapi_autocommit(_unwrap_connection(wrapper), True)
         logger.debug(f"Got DBUtils connection for {self._cfg.type} '{self._cfg.database}'")
         return {"conn": wrapper,
                 "database_type": self._cfg.type,
@@ -213,31 +189,46 @@ class _DBUtilsBackend(_Backend):
             logger.error(f"Failed to dispose DBUtils pool for {self._cfg.type} '{self._cfg.database}'")
 
 
-class _MongoBackend(_Backend):
-    def __init__(self, db_cfg: DatabaseConfig):
+# --------- Spark Backend (singleton session) ---------
+class _SparkBackend(_Backend):
+    """Spark backend using singleton SparkSession - Spark handles concurrency internally."""
+    
+    def __init__(self, db_cfg: DatabaseConfig, spark_opts: Optional[Mapping[str, Any]]):
+        super().__init__(db_cfg)
         self._cfg = db_cfg
-        self._client = DatabaseConnection(db_cfg).connect()  # returns a MongoClient
-        logger.info(f"Created MongoDB client for {self._cfg.type} '{self._cfg.database}'")
-
+        self._session = None
+    
     def _get_client(self):
-        # Do NOT close on context exit; MongoClient.close() would tear down the shared pool
+        from longjrm.connection.connectors import SparkConnector
+        
+        if self._session is None:
+            self._session = SparkConnector(self._cfg).connect()
+        
         return {
-            "conn": self._client,
-            "database_type": self._cfg.type,
-            "database_name": self._cfg.database or "",
-            "db_lib": "pymongo"
+            "conn": self._session,
+            "database_type": "spark",
+            "database_name": self._cfg.database or "default",
+            "db_lib": "pyspark.sql"
         }
-
+    
+    def close_client(self, client):
+        # No-op for Spark - session is reused (singleton pattern)
+        logger.debug("Spark session checkout returned (session remains active)")
+    
     def dispose(self) -> None:
-        try:
-            self._client.close()
-        except Exception:
-            pass
+        if self._session:
+            try:
+                self._session.close()  # Uses unified interface (SparkSessionWrapper.close())
+                logger.info("Stopped SparkSession")
+            except Exception as e:
+                logger.error(f"Failed to stop SparkSession: {e}")
+            finally:
+                self._session = None
 
 
 class Pool:
     """
-    Unified Pool over independent backends (SQLAlchemy / DBUtils / MongoDB).
+    Unified Pool over independent backends (SQLAlchemy / DBUtils).
     """
     def __init__(self, backend_obj: _Backend):
         self._b = backend_obj
@@ -253,14 +244,16 @@ class Pool:
         pool_backend: PoolBackend,
         sa_opts: Optional[Mapping[str, Any]] = None,
         dbutils_opts: Optional[Mapping[str, Any]] = None,
+        spark_opts: Optional[Mapping[str, Any]] = None,
     ) -> "Pool":
+        # Spark uses singleton session pattern, not traditional pooling
+        if db_cfg.type and db_cfg.type.lower() == 'spark':
+            return cls(_SparkBackend(db_cfg, spark_opts))
 
         if pool_backend is PoolBackend.SQLALCHEMY:
             return cls(_SABackend(db_cfg, sa_opts))
         if pool_backend is PoolBackend.DBUTILS:
             return cls(_DBUtilsBackend(db_cfg, dbutils_opts))
-        if pool_backend is PoolBackend.MONGODB:
-            return cls(_MongoBackend(db_cfg))
 
         raise ValueError(f"Unknown backend: {pool_backend!r}")
 
@@ -268,6 +261,11 @@ class Pool:
         return self._b._get_client()
 
     def close_client(self, client: dict[str, Any]):
+        # Delegate to backend if it has a close_client method (e.g., Spark)
+        if hasattr(self._b, 'close_client'):
+            self._b.close_client(client)
+            return
+            
         try:
             client["conn"].close()
             logger.info(f"Released {self._b._cfg.type} connection to {self._b._cfg.database} back to the pool")
@@ -320,22 +318,16 @@ class Pool:
             # Get client connection
             client = self._get_client()
 
-            # Skip transaction setup for MongoDB (it has its own transaction model)
-            if client['database_type'].lower() in ['mongodb', 'mongodb+srv']:
-                tx = TransactionContext(client)
-                yield tx
-                return
-
             raw_conn = client['conn']
             # Set autocommit=False on the actual connection (unwrap all pooling wrappers)
             actual_conn = _unwrap_connection(raw_conn)
-            set_autocommit(actual_conn, False)
+            get_connector_class(client['database_type']).set_dbapi_autocommit(actual_conn, False)
 
             # Set isolation level if specified
             if isolation_level:
                 try:
                     # Use actual connection for consistency
-                    set_isolation_level(actual_conn, client['database_type'], isolation_level)
+                    get_connector_class(client['database_type']).set_isolation_level(actual_conn, isolation_level)
                     logger.debug(f"Set isolation level to {isolation_level}")
                 except Exception as e:
                     logger.warning(f"Could not set isolation level {isolation_level}: {e}")
@@ -364,7 +356,7 @@ class Pool:
         finally:
             if client is not None:
                 # Always restore autocommit=True before returning to pool
-                set_autocommit(_unwrap_connection(client['conn']), True)
+                get_connector_class(client['database_type']).set_dbapi_autocommit(_unwrap_connection(client['conn']), True)
 
                 # Return connection to pool
                 self.close_client(client)
@@ -389,7 +381,7 @@ class Pool:
             result = pool.execute_transaction(my_operations)
         """
         with self.transaction(isolation_level) as tx:
-            db = Db(tx.client)
+            db = get_db(tx.client)
             return operations_func(db)
 
     def execute_batch(self,

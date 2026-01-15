@@ -27,7 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
-from longjrm.database.db import Db
+from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.database import get_db
+from longjrm.tests import test_utils
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -43,38 +45,12 @@ def setup_test_data(db, db_key):
     print(f"Setting up test data for {db_key}...")
     
     try:
-        if db.database_type in ['postgres', 'postgresql']:
-            # Create test table for PostgreSQL
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS test_users (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(50) DEFAULT 'active',
-                metadata JSONB,
-                tags TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        elif db.database_type == 'mysql':
-            # Create test table for MySQL
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS test_users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(50) DEFAULT 'active',
-                metadata JSON,
-                tags TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            )
-            """
+        # Use helper to get create SQL
+        create_table_sql = test_utils.get_create_table_sql(db.database_type, "test_users")
         
-        if db.database_type in ['mysql', 'postgres', 'postgresql']:
+        if create_table_sql:
             # Drop existing table to ensure correct structure
-            db.execute("DROP TABLE IF EXISTS test_users")
+            test_utils.drop_table_silently(db, "test_users")
             db.execute(create_table_sql)
             print("SUCCESS: Test table created/verified")
             
@@ -116,53 +92,6 @@ def setup_test_data(db, db_key):
             
             print(f"SUCCESS: Inserted {len(test_records)} test records")
             
-        else:
-            # MongoDB setup
-            # Clean up existing test data
-            try:
-                collection = db.conn[db.database_name]["test_users"]
-                collection.delete_many({"email": {"$regex": "@updatetest.com$"}})
-                print("SUCCESS: Cleaned up existing test data")
-            except:
-                print("SUCCESS: No existing test data to clean up")
-            
-            # Insert test data for MongoDB
-            test_docs = [
-                {
-                    "name": "John Doe",
-                    "email": "john@updatetest.com", 
-                    "age": 30,
-                    "status": "active",
-                    "metadata": {"department": "Engineering", "level": "Senior"},
-                    "tags": ["developer", "python", "backend"],
-                    "created_at": datetime.datetime.now()
-                },
-                {
-                    "name": "Jane Smith",
-                    "email": "jane@updatetest.com",
-                    "age": 28,
-                    "status": "active", 
-                    "metadata": {"department": "Marketing", "level": "Manager"},
-                    "tags": ["marketing", "strategy"],
-                    "created_at": datetime.datetime.now()
-                },
-                {
-                    "name": "Bob Wilson",
-                    "email": "bob@updatetest.com", 
-                    "age": 35,
-                    "status": "inactive",
-                    "metadata": {"department": "Sales", "level": "Director"},
-                    "tags": ["sales", "b2b"],
-                    "created_at": datetime.datetime.now()
-                }
-            ]
-            
-            for doc in test_docs:
-                result = db.insert("test_users", doc)
-                assert result["status"] == 0, f"Failed to insert test document: {doc['email']}"
-            
-            print(f"SUCCESS: Inserted {len(test_docs)} test documents")
-            
     except Exception as e:
         print(f"WARNING:  Error setting up test data: {e}")
         raise
@@ -180,7 +109,7 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key] = Pool.from_config(db_cfg, backend)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Setup test data
@@ -284,6 +213,34 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
         assert result["status"] == 0, "Non-existent update should succeed (but affect 0 rows)"
         assert result["count"] == 0, "Non-existent update should affect 0 rows"
         
+        # Test 8: Bulk Update (New Method)
+        print("\n--- Test 8: Bulk Update (executemany) ---")
+        
+        # Prepare data for bulk update
+        # We need to explicitly include the key (email) in each record
+        bulk_data_list = [
+            {"email": "john@updatetest.com", "status": "bulk_active", "age": 40},
+            {"email": "jane@updatetest.com", "status": "bulk_active", "age": 41},
+            {"email": "bob@updatetest.com", "status": "bulk_inactive", "age": 42}
+        ]
+        
+        result = db.bulk_update("test_users", bulk_data_list, key_columns=["email"])
+        print(f"Bulk update (executemany) result: {result}")
+        assert result["status"] == 0
+        # Row count support varies by driver for executemany, so we just check status 0
+        # But for test env we expect it to work or at least not fail
+        
+        # Verify updates
+        verify_john = db.query("SELECT * FROM test_users WHERE email = 'john@updatetest.com'")
+        assert verify_john['data'][0]['status'] == 'bulk_active'
+        assert verify_john['data'][0]['age'] == 40
+        
+        verify_bob = db.query("SELECT * FROM test_users WHERE email = 'bob@updatetest.com'")
+        assert verify_bob['data'][0]['status'] == 'bulk_inactive'
+        assert verify_bob['data'][0]['age'] == 42
+        
+        print("SUCCESS: Bulk update (executemany) verified successfully")
+        
         print("\nSUCCESS: All SQL update tests completed successfully")
         
         # Clean up test data
@@ -296,117 +253,6 @@ def test_sql_database_update(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key].dispose()
     print(f"SUCCESS: {db_key} connection closed")
 
-def test_mongodb_database_update(db_key):
-    """Test update functionality for MongoDB"""
-    print(f"\n=== Testing {db_key} Update Operations ===")
-    
-    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
-    configure(cfg)
-    db_cfg = cfg.require(db_key)
-    
-    pools = {}
-    pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
-    
-    with pools[db_key].client() as client:
-        db = Db(client)
-        print(f"Connected to {db.database_type} database: {db.database_name}")
-        
-        # Setup test data
-        setup_test_data(db, db_key)
-        
-        # Test 1: Single document update
-        print("\n--- Test 1: Single Document Update ---")
-        update_data = {
-            "status": "updated",
-            "age": 31,
-            "metadata": {"department": "Engineering", "level": "Lead"}
-        }
-        where_condition = {"email": "john@updatetest.com"}
-        
-        result = db.update("test_users", update_data, where_condition)
-        print(f"Single update result: {result}")
-        assert result["status"] == 0, "Single update should succeed"
-        assert result["count"] >= 1, "Single update should affect at least 1 document"
-        
-        # Test 2: Bulk update with filter
-        print("\n--- Test 2: Bulk Update with Filter ---")
-        bulk_update_data = {
-            "status": "bulk_updated",
-            "tags": ["updated", "bulk"]
-        }
-        bulk_where_condition = {"status": "active"}
-        
-        result = db.update("test_users", bulk_update_data, bulk_where_condition)
-        print(f"Bulk update result: {result}")
-        assert result["status"] == 0, "Bulk update should succeed"
-        
-        # Test 3: Update with complex nested data
-        print("\n--- Test 3: Update with Complex Nested Data ---")
-        complex_update_data = {
-            "metadata": {
-                "department": "Engineering", 
-                "level": "Principal",
-                "skills": ["python", "mongodb", "architecture"],
-                "performance": {"rating": 5, "year": 2024}
-            },
-            "tags": ["senior", "architect", "mentor"]
-        }
-        complex_where_condition = {"email": "jane@updatetest.com"}
-        
-        result = db.update("test_users", complex_update_data, complex_where_condition)
-        print(f"Complex data update result: {result}")
-        assert result["status"] == 0, "Complex data update should succeed"
-        
-        # Test 4: Update with MongoDB-style filter
-        print("\n--- Test 4: MongoDB-style Filter Update ---")
-        mongodb_update_data = {
-            "status": "mongodb_updated"
-        }
-        mongodb_where_condition = {
-            "age": {"$gte": 30},
-            "status": {"$ne": "inactive"}
-        }
-        
-        result = db.update("test_users", mongodb_update_data, mongodb_where_condition)
-        print(f"MongoDB-style filter update result: {result}")
-        assert result["status"] == 0, "MongoDB-style filter update should succeed"
-        
-        # Test 5: Update all documents (no filter)
-        print("\n--- Test 5: Update All Documents (No Filter) ---")
-        global_update_data = {
-            "updated_at": datetime.datetime.now(),
-            "batch_processed": True
-        }
-        
-        result = db.update("test_users", global_update_data)
-        print(f"Global update result: {result}")
-        assert result["status"] == 0, "Global update should succeed"
-        assert result["count"] >= 3, "Global update should affect all test documents"
-        
-        # Test 6: Update non-existent document
-        print("\n--- Test 6: Update Non-existent Document ---")
-        nonexistent_update_data = {
-            "status": "should_not_exist"
-        }
-        nonexistent_where_condition = {"email": "nonexistent@updatetest.com"}
-        
-        result = db.update("test_users", nonexistent_update_data, nonexistent_where_condition)
-        print(f"Non-existent update result: {result}")
-        assert result["status"] == 0, "Non-existent update should succeed (but affect 0 documents)"
-        assert result["count"] == 0, "Non-existent update should affect 0 documents"
-        
-        print("\nSUCCESS: All MongoDB update tests completed successfully")
-        
-        # Clean up test data
-        try:
-            collection = client.conn[db.database_name]["test_users"]
-            delete_result = collection.delete_many({"email": {"$regex": "@updatetest.com$"}})
-            print(f"SUCCESS: Cleaned up {delete_result.deleted_count} test documents")
-        except Exception as e:
-            print(f"WARNING:  Could not clean up test data: {e}")
-    
-    pools[db_key].dispose()
-    print(f"SUCCESS: {db_key} connection closed")
 
 def test_update_error_handling():
     """Test error handling for update operations"""
@@ -416,16 +262,12 @@ def test_update_error_handling():
     configure(cfg)
     
     # Test with first available database
-    available_dbs = ["postgres-test", "mysql-test"]
+    # Test with first available database
+    available_dbs = test_utils.get_active_test_configs(cfg)
     db_key = None
     
-    for test_db in available_dbs:
-        try:
-            db_cfg = cfg.require(test_db)
-            db_key = test_db
-            break
-        except:
-            continue
+    if available_dbs:
+        db_key = available_dbs[0][0] # Just take the first one
     
     if not db_key:
         print("No SQL database available for error handling tests")
@@ -435,7 +277,7 @@ def test_update_error_handling():
     pools[db_key] = Pool.from_config(cfg.require(db_key), PoolBackend.DBUTILS)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         print(f"Testing error handling with {db.database_type} database")
         
         # Test 1: Empty update data
@@ -468,21 +310,23 @@ if __name__ == "__main__":
     print("=== JRM Update Function Test Suite ===")
     
     # Test database and backend combinations
-    test_combinations = [
-        ("postgres-test", PoolBackend.DBUTILS, test_sql_database_update),
-        ("postgres-test", PoolBackend.SQLALCHEMY, test_sql_database_update),
-        ("mysql-test", PoolBackend.DBUTILS, test_sql_database_update),
-        ("mysql-test", PoolBackend.SQLALCHEMY, test_sql_database_update)
-    ]
-    
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
     
+    test_combinations = []
+    active_configs = test_utils.get_active_test_configs(cfg)
+    
+    for db_key, backend in active_configs:
+         test_combinations.append((db_key, backend, test_sql_database_update))
+
     # Test all available database/backend combinations, abort on first failure
     combinations_tested = 0
     for db_key, backend, test_function in test_combinations:
         try:
             # Check if database configuration exists
             db_cfg = cfg.require(db_key)
+            if db_cfg.type == 'spark':
+                print(f"Skipping {db_key} (Spark databases are run in spark_test.py)")
+                continue
             
             # Run all tests for this database/backend combination
             print(f"\n>>> Running tests with {db_key} using {backend.value} backend")

@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "longjrm"
+version = "0.1.0"
+description = "JRM Library for Python"
+authors = [
+    {name = "Mike Gong at LONGINFO"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "DBUtils>=3.0.3",
+    "cryptography>=41.0.0",
+]
+
+[project.optional-dependencies]
+mysql = ["PyMySQL>=1.1.0"]
+postgres = ["psycopg[binary]>=3.1.0"]
+oracle = ["oracledb>=2.0.0"]
+sqlserver = ["pyodbc>=4.0.39"]
+db2 = ["ibm_db>=3.2.0"]
+spark = ["pyspark>=3.3.0", "delta-spark>=2.3.0"]
+sqlalchemy = ["SQLAlchemy>=2.0.0"]
+all = [
+    "PyMySQL>=1.1.0",
+    "psycopg[binary]>=3.1.0",
+    "oracledb>=2.0.0",
+    "pyodbc>=4.0.39",
+    "ibm_db>=3.2.0",
+    "ibm-db-sa>=0.4.0",
+    "pyspark>=3.3.0",
+    "delta-spark>=2.3.0",
+    "SQLAlchemy>=2.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+longjrm = ["connection/driver_map.json"]

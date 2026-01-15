@@ -27,7 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
-from longjrm.database.db import Db
+
+from longjrm.database import get_db
+from longjrm.tests import test_utils
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -43,40 +45,13 @@ def setup_test_data(db, db_key):
     print(f"Setting up test data for {db_key}...")
     
     try:
-        if db.database_type in ['postgres', 'postgresql']:
-            # Create test table for PostgreSQL
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS test_users (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(50) DEFAULT 'active',
-                metadata JSONB,
-                tags TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        elif db.database_type == 'mysql':
-            # Create test table for MySQL
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS test_users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(50) DEFAULT 'active',
-                metadata JSON,
-                tags TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            )
-            """
+
+        # Get appropriate create table SQL
+        create_table_sql = test_utils.get_create_table_sql(db.database_type, "test_users")
         
-        if db.database_type in ['mysql', 'postgres', 'postgresql']:
+        if create_table_sql:
             # Drop existing table to ensure correct structure
-            db.execute("DROP TABLE IF EXISTS test_users")
+            test_utils.drop_table_silently(db, "test_users")
             db.execute(create_table_sql)
             print("SUCCESS: Test table created/verified")
             
@@ -139,63 +114,6 @@ def setup_test_data(db, db_key):
             else:
                 print("WARNING: Could not verify record count")
                 return len(test_records)
-        
-        elif db.database_type in ['mongodb', 'mongodb+srv']:
-            # MongoDB test data setup
-            test_docs = [
-                {
-                    "name": "John Doe",
-                    "email": "john@deletetest.com", 
-                    "age": 30,
-                    "status": "active",
-                    "metadata": {"department": "Engineering", "level": "Senior"},
-                    "tags": ["developer", "python", "backend"],
-                    "created_at": datetime.datetime.now()
-                },
-                {
-                    "name": "Jane Smith",
-                    "email": "jane@deletetest.com",
-                    "age": 28,
-                    "status": "active", 
-                    "metadata": {"department": "Marketing", "level": "Manager"},
-                    "tags": ["marketing", "strategy"],
-                    "created_at": datetime.datetime.now()
-                },
-                {
-                    "name": "Bob Wilson",
-                    "email": "bob@deletetest.com", 
-                    "age": 35,
-                    "status": "inactive",
-                    "metadata": {"department": "Sales", "level": "Director"},
-                    "tags": ["sales", "b2b"],
-                    "created_at": datetime.datetime.now()
-                },
-                {
-                    "name": "Alice Brown",
-                    "email": "alice@deletetest.com",
-                    "age": 26,
-                    "status": "active",
-                    "metadata": {"department": "Engineering", "level": "Junior"},
-                    "tags": ["developer", "frontend", "react"],
-                    "created_at": datetime.datetime.now()
-                },
-                {
-                    "name": "Charlie Green",
-                    "email": "charlie@deletetest.com",
-                    "age": 32,
-                    "status": "pending",
-                    "metadata": {"department": "DevOps", "level": "Senior"},
-                    "tags": ["devops", "kubernetes", "aws"],
-                    "created_at": datetime.datetime.now()
-                }
-            ]
-            
-            # Insert test documents
-            result = db.insert("test_users", test_docs)
-            if result['status'] != 0:
-                raise Exception(f"Failed to insert test documents: {result.get('message', 'Unknown error')}")
-            print(f"SUCCESS: Inserted {result['count']} test documents for delete testing")
-            return len(test_docs)
             
     except Exception as e:
         print(f"ERROR: Failed to setup test data: {e}")
@@ -214,7 +132,7 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key] = Pool.from_config(db_cfg, backend)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Setup test data
@@ -431,180 +349,8 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key].dispose()
     print(f"Connection closed for {db_key}")
 
-def test_mongodb_database(db_key):
-    """Test delete functionality for MongoDB"""
-    print(f"\n=== Testing {db_key} Delete Operations ===")
-    
-    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
-    configure(cfg)
-    db_cfg = cfg.require(db_key)
-    
-    pools = {}
-    pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
-    
-    with pools[db_key].client() as client:
-        db = Db(client)
-        print(f"Connected to {db.database_type} database: {db.database_name}")
-        
-        # Setup test data
-        try:
-            initial_count = setup_test_data(db, db_key)
-            print(f"SUCCESS: Test data setup completed with {initial_count} documents")
-        except Exception as e:
-            error_msg = f"FAILED: Test data setup failed: {e}"
-            logger.error(error_msg)
-            print(error_msg)
-            raise Exception(f"Test setup failed for {db_key}: {e}")
-        
-        # Test 1: Delete with simple where condition
-        try:
-            print("\n--- Test 1: Delete with Simple Where Condition ---")
-            where_simple = {"status": "inactive"}
-            result = db.delete("test_users", where_simple)
-            print(f"Simple where delete result: {result}")
-            
-            if result["status"] != 0:
-                raise Exception(f"Simple where delete failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            if result["count"] < 1:
-                raise Exception(f"Simple where delete should affect at least 1 document, but affected {result['count']}")
-            
-            # Verify deletion
-            collection = client["conn"][db.database_name]["test_users"]
-            remaining_inactive = collection.count_documents({"status": "inactive", "email": {"$regex": "@deletetest.com$"}})
-            print(f"Verification: {remaining_inactive} inactive documents remain (should be 0)")
-            
-            if remaining_inactive != 0:
-                raise Exception(f"Delete verification failed: {remaining_inactive} inactive documents still remain")
-            
-            print("SUCCESS: Test 1 passed - Simple where condition delete")
-        except Exception as e:
-            error_msg = f"FAILED: Test 1 - Simple where condition delete: {e}"
-            logger.error(error_msg)
-            print(error_msg)
-            raise Exception(f"Test 1 failed for {db_key}: {e}")
-        
-        # Test 2: Delete with MongoDB query operators
-        try:
-            print("\n--- Test 2: Delete with MongoDB Query Operators ---")
-            where_mongo = {"age": {"$gt": 30}}
-            result = db.delete("test_users", where_mongo)
-            print(f"MongoDB operators delete result: {result}")
-            
-            if result["status"] != 0:
-                raise Exception(f"MongoDB operators delete failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            
-            # Verify deletion
-            collection = client["conn"][db.database_name]["test_users"]
-            remaining_older = collection.count_documents({"age": {"$gt": 30}, "email": {"$regex": "@deletetest.com$"}})
-            print(f"Verification: {remaining_older} documents with age > 30 remain (should be 0)")
-            
-            if remaining_older != 0:
-                raise Exception(f"Delete verification failed: {remaining_older} documents with age > 30 still remain")
-            
-            print("SUCCESS: Test 2 passed - MongoDB query operators delete")
-        except Exception as e:
-            error_msg = f"FAILED: Test 2 - MongoDB query operators delete: {e}"
-            logger.error(error_msg)
-            print(error_msg)
-            raise Exception(f"Test 2 failed for {db_key}: {e}")
-        
-        # Test 3: Delete with multiple conditions
-        try:
-            print("\n--- Test 3: Delete with Multiple Conditions ---")
-            # Check what documents remain
-            collection = client["conn"][db.database_name]["test_users"]
-            remaining_docs = list(collection.find({"email": {"$regex": "@deletetest.com$"}}))
-            print(f"Remaining documents count: {len(remaining_docs)}")
-            
-            if remaining_docs:
-                # Delete documents with specific conditions
-                where_multiple = {
-                    "status": "active",
-                    "email": {"$regex": "@deletetest.com$"}
-                }
-                result = db.delete("test_users", where_multiple)
-                print(f"Multiple conditions delete result: {result}")
-                
-                if result["status"] != 0:
-                    raise Exception(f"Multiple conditions delete failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            
-            print("SUCCESS: Test 3 passed - Multiple conditions delete")
-        except Exception as e:
-            error_msg = f"FAILED: Test 3 - Multiple conditions delete: {e}"
-            logger.error(error_msg)
-            print(error_msg)
-            raise Exception(f"Test 3 failed for {db_key}: {e}")
-        
-        # Test 4: Delete all remaining test documents
-        try:
-            print("\n--- Test 4: Delete All Remaining Test Documents ---")
-            collection = client["conn"][db.database_name]["test_users"]
-            remaining_count = collection.count_documents({"email": {"$regex": "@deletetest.com$"}})
-            print(f"Documents remaining before cleanup: {remaining_count}")
-            
-            if remaining_count > 0:
-                where_cleanup = {"email": {"$regex": "@deletetest.com$"}}
-                result = db.delete("test_users", where_cleanup)
-                print(f"Cleanup delete result: {result}")
-                
-                if result["status"] != 0:
-                    raise Exception(f"Cleanup delete failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            
-            print("SUCCESS: Test 4 passed - Cleanup delete")
-        except Exception as e:
-            error_msg = f"FAILED: Test 4 - Cleanup delete: {e}"
-            logger.error(error_msg)
-            print(error_msg)
-            raise Exception(f"Test 4 failed for {db_key}: {e}")
-        
-        # Test 5: Delete from empty result set
-        try:
-            print("\n--- Test 5: Delete from Empty Result Set ---")
-            where_empty = {"email": "nonexistent@deletetest.com"}
-            result = db.delete("test_users", where_empty)
-            print(f"Empty delete result: {result}")
-            
-            if result["status"] != 0:
-                raise Exception(f"Delete with no matches failed with status {result['status']}: {result.get('message', 'Unknown error')}")
-            if result["count"] != 0:
-                raise Exception(f"Delete with no matches should affect 0 documents, but affected {result['count']}")
-            
-            print("SUCCESS: Test 5 passed - Delete from empty result set")
-        except Exception as e:
-            error_msg = f"FAILED: Test 5 - Delete from empty result set: {e}"
-            logger.error(error_msg)
-            print(error_msg)
-            raise Exception(f"Test 5 failed for {db_key}: {e}")
-        
-        # Final verification
-        try:
-            print("\n--- Final Verification ---")
-            collection = client["conn"][db.database_name]["test_users"]
-            final_count = collection.count_documents({"email": {"$regex": "@deletetest.com$"}})
-            print(f"Final test document count: {final_count} (should be 0)")
-            
-            if final_count != 0:
-                print(f"WARNING: {final_count} test documents still remain - attempting final cleanup")
-                collection.delete_many({"email": {"$regex": "@deletetest.com$"}})
-                print("Final cleanup completed")
-            
-            print("SUCCESS: All MongoDB delete tests completed successfully")
-        except Exception as e:
-            error_msg = f"FAILED: Final verification: {e}"
-            logger.error(error_msg)
-            print(error_msg)
-            raise Exception(f"Final verification failed for {db_key}: {e}")
-        
-        # Final cleanup
-        try:
-            collection = client["conn"][db.database_name]["test_users"]
-            collection.delete_many({"email": {"$regex": "@deletetest.com$"}})
-            print("Final cleanup completed")
-        except:
-            pass
-    
-    pools[db_key].dispose()
-    print(f"Connection closed for {db_key}")
+
+
 
 def test_error_handling():
     """Test error handling for delete operations"""
@@ -614,16 +360,12 @@ def test_error_handling():
     configure(cfg)
     
     # Test with first available database
-    available_dbs = ["postgres-test", "mysql-test"]
+
+    available_dbs = test_utils.get_active_test_configs(cfg)
     db_key = None
     
-    for test_db in available_dbs:
-        try:
-            db_cfg = cfg.require(test_db)
-            db_key = test_db
-            break
-        except:
-            continue
+    if available_dbs:
+        db_key = available_dbs[0][0] # Just take the first one
     
     if not db_key:
         print("No SQL database available for error handling tests")
@@ -633,7 +375,7 @@ def test_error_handling():
     pools[db_key] = Pool.from_config(cfg.require(db_key), PoolBackend.DBUTILS)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Test 1: Delete from non-existent table
@@ -682,29 +424,27 @@ if __name__ == "__main__":
     print("Testing delete operations with abort-on-failure behavior")
     
     # Test database and backend combinations
-    test_combinations = [
-        ("postgres-test", PoolBackend.DBUTILS, test_sql_database),
-        ("postgres-test", PoolBackend.SQLALCHEMY, test_sql_database),
-        ("mysql-test", PoolBackend.DBUTILS, test_sql_database),
-        ("mysql-test", PoolBackend.SQLALCHEMY, test_sql_database),
-        ("mongodb-test", PoolBackend.MONGODB, test_mongodb_database)
-    ]
-    
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
     
+    test_combinations = []
+    active_configs = test_utils.get_active_test_configs(cfg)
+    
+    for db_key, backend in active_configs:
+         test_combinations.append((db_key, backend, test_sql_database))
+
     # Test all available database/backend combinations, abort on first failure
     combinations_tested = 0
     for db_key, backend, test_function in test_combinations:
         try:
             # Check if database configuration exists
             db_cfg = cfg.require(db_key)
+            if db_cfg.type == 'spark':
+                print(f"Skipping {db_key} (Spark databases are run in spark_test.py)")
+                continue
             
             # Run all tests for this database/backend combination
             print(f"\n>>> Running tests with {db_key} using {backend.value} backend")
-            if backend == PoolBackend.MONGODB:
-                test_function(db_key)
-            else:
-                test_function(db_key, backend)
+            test_function(db_key, backend)
             print(f"SUCCESS: {db_key} ({backend.value}) tests completed successfully")
             combinations_tested += 1
             

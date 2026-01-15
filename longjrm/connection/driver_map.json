@@ -1,10 +1,47 @@
 {
-    "postgres":   { "dbapi": "psycopg2", "sa_dialect": "postgresql", "sa_driver": "psycopg2" },
-    "postgresql": { "dbapi": "psycopg2", "sa_dialect": "postgresql", "sa_driver": "psycopg2" },
-    "mysql":      { "dbapi": "pymysql",  "sa_dialect": "mysql",      "sa_driver": "pymysql"  },
-    "mariadb":    { "dbapi": "pymysql",  "sa_dialect": "mysql",      "sa_driver": "pymysql"  },
-    "sqlite":     { "dbapi": "sqlite3",  "sa_dialect": "sqlite",     "sa_driver": null       },
-    "mongodb":    { "dbapi": "pymongo",  "sa_dialect": null,         "sa_driver": null       },
-    "mongodb+srv":{ "dbapi": "pymongo",  "sa_dialect": null,         "sa_driver": null       }
+  "postgres": {
+    "dbapi": "psycopg",
+    "sa_dialect": "postgresql",
+    "sa_driver": "psycopg"
+  },
+  "postgresql": {
+    "dbapi": "psycopg",
+    "sa_dialect": "postgresql",
+    "sa_driver": "psycopg"
+  },
+  "mysql": {
+    "dbapi": "pymysql",
+    "sa_dialect": "mysql",
+    "sa_driver": "pymysql"
+  },
+  "mariadb": {
+    "dbapi": "pymysql",
+    "sa_dialect": "mysql",
+    "sa_driver": "pymysql"
+  },
+  "sqlite": {
+    "dbapi": "sqlite3",
+    "sa_dialect": "sqlite",
+    "sa_driver": null
+  },
+  "db2": {
+    "dbapi": "ibm_db_dbi",
+    "sa_dialect": "ibm_db_sa",
+    "sa_driver": null
+  },
+  "oracle": {
+    "dbapi": "oracledb",
+    "sa_dialect": "oracle",
+    "sa_driver": "oracledb"
+  },
+  "sqlserver": {
+    "dbapi": "pyodbc",
+    "sa_dialect": "mssql",
+    "sa_driver": "pyodbc"
+  },
+  "spark": {
+    "dbapi": "pyspark.sql",
+    "sa_dialect": null,
+    "sa_driver": null
   }
-  
+}

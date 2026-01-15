@@ -27,7 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
-from longjrm.database.db import Db
+from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.database import get_db
+from longjrm.tests import test_utils
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -51,44 +53,20 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key] = Pool.from_config(db_cfg, backend)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         print(f"Connected to {db.database_type} database: {db.database_name}")
         
         # Create test table if it doesn't exist
         try:
-            if db.database_type in ['postgres', 'postgresql']:
-                # PostgreSQL with unique constraint for merge testing
-                create_table_sql = """
-                CREATE TABLE IF NOT EXISTS test_merge_users (
-                    id SERIAL PRIMARY KEY,
-                    email VARCHAR(100) UNIQUE NOT NULL,
-                    name VARCHAR(100),
-                    age INTEGER,
-                    department VARCHAR(50),
-                    status VARCHAR(20) DEFAULT 'active',
-                    metadata JSONB,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            else:  # MySQL
-                create_table_sql = """
-                CREATE TABLE IF NOT EXISTS test_merge_users (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    email VARCHAR(100) UNIQUE NOT NULL,
-                    name VARCHAR(100),
-                    age INTEGER,
-                    department VARCHAR(50),
-                    status VARCHAR(20) DEFAULT 'active',
-                    metadata JSON,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY unique_email (email)
-                )
-                """
+             # Drop table first for clean state
+            test_utils.drop_table_silently(db, "test_merge_users")
             
-            db.execute(create_table_sql)
-            print("SUCCESS: Test merge table created/verified")
+            create_table_sql = test_utils.get_create_table_sql(db.database_type, "test_merge_users")
+            if create_table_sql:
+                db.execute(create_table_sql)
+                print("SUCCESS: Test merge table created/verified")
         except Exception as e:
-            print(f"WARNING: Could not create test table (may already exist): {e}")
+            print(f"WARNING: Could not create test table (may already exist or other error): {e}")
         
         # Clean up any existing test data
         try:
@@ -199,31 +177,13 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
         print("\n--- Test 4: Multi-column Key Merge ---")
         # First create a table with composite key
         try:
-            if db.database_type in ['postgres', 'postgresql']:
-                create_composite_sql = """
-                CREATE TABLE IF NOT EXISTS test_user_roles (
-                    user_id INTEGER NOT NULL,
-                    role_id INTEGER NOT NULL,
-                    permissions TEXT,
-                    granted_by VARCHAR(100),
-                    granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, role_id)
-                )
-                """
-            else:  # MySQL
-                create_composite_sql = """
-                CREATE TABLE IF NOT EXISTS test_user_roles (
-                    user_id INTEGER NOT NULL,
-                    role_id INTEGER NOT NULL,
-                    permissions TEXT,
-                    granted_by VARCHAR(100),
-                    granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, role_id)
-                )
-                """
+            # Drop table first
+            test_utils.drop_table_silently(db, "test_user_roles")
             
-            db.execute(create_composite_sql)
-            print("SUCCESS: Test user_roles table created/verified")
+            create_composite_sql = test_utils.get_create_table_sql(db.database_type, "test_user_roles")
+            if create_composite_sql:
+                db.execute(create_composite_sql)
+                print("SUCCESS: Test user_roles table created/verified")
         except Exception as e:
             print(f"WARNING: Could not create user_roles table: {e}")
         
@@ -304,181 +264,6 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key].dispose()
     print(f"SUCCESS: {db_key} connection closed")
 
-def test_mongodb_database(db_key):
-    """Test merge functionality for MongoDB"""
-    print(f"\n=== Testing {db_key} Merge Operations ===")
-    
-    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
-    configure(cfg)
-    db_cfg = cfg.require(db_key)
-    
-    pools = {}
-    pools[db_key] = Pool.from_config(db_cfg, PoolBackend.MONGODB)
-    
-    with pools[db_key].client() as client:
-        db = Db(client)
-        print(f"Connected to {db.database_type} database: {db.database_name}")
-        
-        # Clean up any existing test data
-        try:
-            collection = client.conn[db.database_name]["test_merge_users"]
-            collection.delete_many({"email": {"$regex": "@mergetest.com$"}})
-            print("SUCCESS: Cleaned up existing test data")
-        except:
-            print("SUCCESS: No existing test data to clean up")
-        
-        # Test 1: Single document merge (upsert INSERT scenario)
-        print("\n--- Test 1: Single Document Merge (UPSERT INSERT) ---")
-        new_user = {
-            "email": "john@mergetest.com",
-            "name": "John Doe",
-            "age": 30,
-            "department": "Engineering",
-            "status": "active",
-            "metadata": {"level": "Senior", "skills": ["Python", "MongoDB"]},
-            "last_updated": datetime.datetime.now()
-        }
-        
-        result = db.merge("test_merge_users", new_user, ["email"])
-        print(f"Single merge (UPSERT INSERT) result: {result}")
-        assert result["status"] == 0, "Single merge upsert should succeed"
-        assert result["count"] >= 1, "Single merge upsert should affect at least 1 document"
-        
-        # Verify the document was inserted
-        collection = client.conn[db.database_name]["test_merge_users"]
-        doc = collection.find_one({"email": "john@mergetest.com"})
-        assert doc is not None, "Document should be found"
-        assert doc["name"] == "John Doe", "Name should match inserted value"
-        print("SUCCESS: Verified document was inserted correctly")
-        
-        # Test 2: Single document merge (upsert UPDATE scenario)
-        print("\n--- Test 2: Single Document Merge (UPSERT UPDATE) ---")
-        updated_user = {
-            "email": "john@mergetest.com",  # Same email (key)
-            "name": "John Smith",  # Updated name
-            "age": 31,  # Updated age
-            "department": "DevOps",  # Updated department
-            "status": "active",
-            "metadata": {"level": "Lead", "skills": ["Python", "Docker", "MongoDB"]},
-            "last_updated": datetime.datetime.now()
-        }
-        
-        result = db.merge("test_merge_users", updated_user, ["email"])
-        print(f"Single merge (UPSERT UPDATE) result: {result}")
-        assert result["status"] == 0, "Single merge update should succeed"
-        assert result["count"] >= 1, "Single merge update should affect at least 1 document"
-        
-        # Verify the document was updated
-        doc = collection.find_one({"email": "john@mergetest.com"})
-        assert doc is not None, "Document should still be found"
-        assert doc["name"] == "John Smith", "Name should be updated"
-        assert doc["age"] == 31, "Age should be updated"
-        assert doc["department"] == "DevOps", "Department should be updated"
-        print("SUCCESS: Verified document was updated correctly")
-        
-        # Test 3: Bulk merge (mixed upserts)
-        print("\n--- Test 3: Bulk Merge (Mixed Upserts) ---")
-        bulk_users = [
-            {
-                "email": "john@mergetest.com",  # Existing - should UPDATE
-                "name": "John Doe Updated",
-                "age": 32,
-                "department": "Engineering",
-                "status": "active",
-                "metadata": {"level": "Principal", "skills": ["Python", "Architecture", "MongoDB"]}
-            },
-            {
-                "email": "jane@mergetest.com",  # New - should INSERT
-                "name": "Jane Smith",
-                "age": 28,
-                "department": "Marketing",
-                "status": "active",
-                "metadata": {"level": "Manager", "skills": ["Analytics", "Strategy"]}
-            },
-            {
-                "email": "bob@mergetest.com",  # New - should INSERT
-                "name": "Bob Wilson",
-                "age": 35,
-                "department": "Sales",
-                "status": "active",
-                "metadata": {"level": "Director", "skills": ["B2B", "Enterprise"]}
-            }
-        ]
-        
-        result = db.merge("test_merge_users", bulk_users, ["email"])
-        print(f"Bulk merge result: {result}")
-        assert result["status"] == 0, "Bulk merge should succeed"
-        assert result["count"] >= 3, "Bulk merge should affect at least 3 documents"
-        
-        # Verify all documents are present
-        docs = list(collection.find({"email": {"$regex": "@mergetest.com$"}}).sort("email", 1))
-        assert len(docs) == 3, "Should find exactly 3 documents after bulk merge"
-        
-        # Verify John's document was updated
-        john_doc = next(d for d in docs if d["email"] == "john@mergetest.com")
-        assert john_doc["name"] == "John Doe Updated", "John's name should be updated"
-        assert john_doc["age"] == 32, "John's age should be updated"
-        
-        # Verify Jane and Bob were inserted
-        jane_doc = next(d for d in docs if d["email"] == "jane@mergetest.com")
-        bob_doc = next(d for d in docs if d["email"] == "bob@mergetest.com")
-        assert jane_doc["name"] == "Jane Smith", "Jane should be inserted correctly"
-        assert bob_doc["name"] == "Bob Wilson", "Bob should be inserted correctly"
-        print("SUCCESS: Verified bulk merge worked correctly")
-        
-        # Test 4: Multi-field key merge
-        print("\n--- Test 4: Multi-field Key Merge ---")
-        # Clean up user_roles collection
-        try:
-            user_roles_collection = client.conn[db.database_name]["test_user_roles"]
-            user_roles_collection.delete_many({"granted_by": "merge_test"})
-        except:
-            pass
-        
-        # Merge with composite key
-        user_role = {
-            "user_id": 1,
-            "role_id": 2,
-            "permissions": ["read", "write"],
-            "granted_by": "merge_test",
-            "granted_at": datetime.datetime.now()
-        }
-        
-        result = db.merge("test_user_roles", user_role, ["user_id", "role_id"])
-        print(f"Multi-field key merge result: {result}")
-        assert result["status"] == 0, "Multi-field key merge should succeed"
-        assert result["count"] >= 1, "Multi-field key merge should affect at least 1 document"
-        
-        # Update the same document
-        updated_role = {
-            "user_id": 1,
-            "role_id": 2,
-            "permissions": ["read", "write", "admin"],
-            "granted_by": "merge_test",
-            "granted_at": datetime.datetime.now()
-        }
-        
-        result = db.merge("test_user_roles", updated_role, ["user_id", "role_id"])
-        print(f"Multi-field key merge update result: {result}")
-        assert result["status"] == 0, "Multi-field key merge update should succeed"
-        
-        # Verify the update
-        user_roles_collection = client.conn[db.database_name]["test_user_roles"]
-        role_doc = user_roles_collection.find_one({"user_id": 1, "role_id": 2})
-        assert role_doc is not None, "Should find user_role document"
-        assert "admin" in role_doc["permissions"], "Permissions should be updated"
-        print("SUCCESS: Verified multi-field key merge worked")
-        
-        # Clean up test data
-        try:
-            collection.delete_many({"email": {"$regex": "@mergetest.com$"}})
-            user_roles_collection.delete_many({"granted_by": "merge_test"})
-            print("SUCCESS: Cleaned up test data")
-        except:
-            print("SUCCESS: No test data to clean up")
-    
-    pools[db_key].dispose()
-    print(f"SUCCESS: {db_key} connection closed")
 
 def test_error_handling():
     """Test error handling for merge operations"""
@@ -488,16 +273,12 @@ def test_error_handling():
     configure(cfg)
     
     # Test with first available database
-    available_dbs = ["postgres-test", "mysql-test"]
+    # Test with first available database
+    available_dbs = test_utils.get_active_test_configs(cfg)
     db_key = None
     
-    for test_db in available_dbs:
-        try:
-            db_cfg = cfg.require(test_db)
-            db_key = test_db
-            break
-        except:
-            continue
+    if available_dbs:
+        db_key = available_dbs[0][0] # Just take the first one
     
     if not db_key:
         print("No SQL database available for error handling tests")
@@ -507,7 +288,7 @@ def test_error_handling():
     pools[db_key] = Pool.from_config(cfg.require(db_key), PoolBackend.DBUTILS)
     
     with pools[db_key].client() as client:
-        db = Db(client)
+        db = get_db(client)
         # Test empty data
         print("\n--- Test: Empty Data Handling ---")
         result = db.merge("test_merge_users", [], ["email"])
@@ -538,14 +319,14 @@ if __name__ == "__main__":
     print("=== JRM Merge Function Test Suite ===")
     
     # Test database and backend combinations
-    test_combinations = [
-        ("postgres-test", PoolBackend.DBUTILS, test_sql_database),
-        ("postgres-test", PoolBackend.SQLALCHEMY, test_sql_database),
-        ("mysql-test", PoolBackend.DBUTILS, test_sql_database),
-        ("mysql-test", PoolBackend.SQLALCHEMY, test_sql_database)
-    ]
-    
+    # Test database and backend combinations
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+    
+    test_combinations = []
+    active_configs = test_utils.get_active_test_configs(cfg)
+    
+    for db_key, backend in active_configs:
+         test_combinations.append((db_key, backend, test_sql_database))
     
     # Test all available database/backend combinations, abort on first failure
     combinations_tested = 0
@@ -553,6 +334,11 @@ if __name__ == "__main__":
         try:
             # Check if database configuration exists
             db_cfg = cfg.require(db_key)
+            
+            # Skip Spark databases (they require separate spark_test.py)
+            if db_cfg.type == 'spark':
+                print(f"Skipping {db_key} (Spark databases are run in spark_test.py)")
+                continue
             
             # Run all tests for this database/backend combination
             print(f"\n>>> Running tests with {db_key} using {backend.value} backend")
@@ -568,19 +354,7 @@ if __name__ == "__main__":
             print("ABORTING: Test failed, stopping execution")
             sys.exit(1)  # Abort on first failure
     
-    # Test MongoDB if available
-    try:
-        cfg.require("mongodb-test")
-        print(f"\n>>> Running tests with mongodb-test")
-        test_mongodb_database("mongodb-test")
-        print(f"SUCCESS: mongodb-test tests completed successfully")
-        combinations_tested += 1
-    except KeyError:
-        print("WARNING: mongodb-test configuration not found, skipping...")
-    except Exception as e:
-        print(f"FAILED: mongodb-test tests failed: {e}")
-        print("ABORTING: MongoDB test failed, stopping execution")
-        sys.exit(1)
+
     
     if combinations_tested == 0:
         print("ERROR: No database configurations found")

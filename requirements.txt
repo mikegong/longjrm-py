@@ -1,9 +1,12 @@
-# Database drivers (imported conditionally based on database type)
-PyMySQL>=1.1.0,<2.0.0
-psycopg2-binary>=2.9.0,<3.0.0
-pymongo>=4.6.0,<5.0.0
+# Core dependencies
+DBUtils>=3.0.3
+cryptography>=41.0.0
 
-DBUtils>=3.0.3,<4.0.0
-
-# Connection pooling backends
-# SQLAlchemy>=2.0.0,<3.0.0  # Optional: Advanced connection pooling (install via: pip install longjrm[sqlalchemy])
+# Optional Database Drivers (Install via pip install longjrm[extra])
+# mysql: PyMySQL>=1.1.0
+# postgres: psycopg[binary]>=3.1.0
+# oracle: oracledb>=2.0.0
+# sqlserver: pyodbc>=4.0.39
+# db2: ibm_db>=3.2.0
+# spark: pyspark>=3.3.0, delta-spark>=2.3.0
+# sqlalchemy: SQLAlchemy>=2.0.0

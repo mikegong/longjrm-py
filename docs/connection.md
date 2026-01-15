@@ -1,17 +1,29 @@
 # LongJRM Database Connection & Pooling Guide
 
-## Overview
-
-LongJRM provides a sophisticated connection management system that abstracts database connectivity across multiple database types while maintaining high performance through configurable connection pooling. The system supports both direct connections and pooled connections with multiple backend implementations.
-
 ## Architecture
 
+LongJRM uses a layered approach to connection management:
+
+1.  **Pool Layer (`pool.Pool`)**:
+    -   Unified facade for multiple backend pooling strategies.
+    -   Supports **DBUtils** (lightweight, standard) and **SQLAlchemy** (robust, enterprise).
+    -   Handles pool lifecycle (creation, checkout, checkin, disposal).
+
+2.  **Connector Layer (`connectors.BaseConnector`)**:
+    -   **Factory Pattern**: `get_connector_class(type)` selects the right connector or falls back to generic.
+    -   **Type-Safe Config**: Uses `DatabaseConfig` dataclass.
+    -   **Driver Abstraction**: Normalizes DB-API 2.0 quirks (DSN generation, param style).
+
+3.  **Client Context**:
+    -   Connections are checked out as a `client` dictionary within a context manager.
+    -   Automatically returns connection to pool on exit.
+    -   Provides transaction keys (`db_type`, `db_name`) for the `Db` class.
 ### Core Components
 
 - **`DatabaseConnection`**: Low-level database connection abstraction
 - **`Pool`**: High-level connection pooling with multiple backends
 - **`DriverRegistry`**: Dynamic driver loading and SQLAlchemy dialect mapping
-- **Connection Backends**: SQLAlchemy, DBUtils, and MongoDB-specific implementations
+- **Connection Backends**: SQLAlchemy and DBUtils implementations
 
 ### Driver Support
 
@@ -19,64 +31,62 @@ The connection system supports multiple database types through a driver registry
 
 | Database | DB-API Module | SQLAlchemy Dialect | SQLAlchemy Driver |
 |----------|---------------|-------------------|-------------------|
-| PostgreSQL | `psycopg2` | `postgresql` | `psycopg2` |
+| PostgreSQL | `psycopg` (v3) | `postgresql` | `psycopg` |
 | MySQL | `pymysql` | `mysql` | `pymysql` |
 | MariaDB | `pymysql` | `mysql` | `pymysql` |
 | SQLite | `sqlite3` | `sqlite` | (built-in) |
-| MongoDB | `pymongo` | (NoSQL - no dialect) | (NoSQL - no driver) |
+| Oracle | `oracledb` | `oracle` | `oracledb` |
+| DB2 | `ibm_db_dbi` | `db2` | `ibm_db_sa` |
+| SQL Server | `pyodbc` | `mssql` | `pyodbc` |
+| Spark SQL | `pyspark` | N/A | N/A |
 
-## Direct Database Connections
+## Basic Connection Setup
 
-### DatabaseConnection Class
+### 1. Using Runtime Configuration (Recommended)
 
-The `DatabaseConnection` class provides direct, non-pooled database connections with automatic driver loading and connection management.
+Let the runtime loader handle file/env config automatically.
 
-#### Basic Usage
+```python
+from longjrm.config.runtime import get_config
+from longjrm.connection.pool import Pool, PoolBackend
+
+# Load config from default sources (env > files)
+cfg = get_config()
+
+# Initialize pool for a specific database key
+pool = Pool.from_config(cfg.require("my-postgres-db"), PoolBackend.DBUTILS)
+
+# Use connection
+with pool.client() as client:
+    cursor = client['conn'].cursor()
+    cursor.execute("SELECT 1")
+```
+
+### 2. Manual Configuration
+
+Explicitly define `DatabaseConfig`.
 
 ```python
 from longjrm.config.config import DatabaseConfig
-from longjrm.connection.dbconn import DatabaseConnection
+from longjrm.connection.pool import Pool, PoolBackend
 
-# Create database configuration
-db_config = DatabaseConfig(
+# Define config
+db_cfg = DatabaseConfig(
     type="postgres",
     host="localhost",
     port=5432,
-    user="app_user",
-    password="secret",
-    database="production"
+    user="user",
+    password="password",
+    database="mydb"
 )
 
-# Create and connect
-db_conn = DatabaseConnection(db_config)
-conn = db_conn.connect()
-
-# Use the connection
-cursor = conn.cursor()
-cursor.execute("SELECT VERSION()")
-result = cursor.fetchone()
-print(f"Database version: {result}")
-
-# Clean up
-db_conn.close()
+# Initialize pool
+pool = Pool.from_config(db_cfg, PoolBackend.DBUTILS)
 ```
+## Configuration Examples
 
-#### DSN-Based Connection
+### PostgreSQL
 
-```python
-# Using DSN (Data Source Name) - preferred method
-db_config = DatabaseConfig(
-    type="postgres",
-    dsn="postgres://user:password@localhost:5432/mydb?sslmode=require"
-)
-
-db_conn = DatabaseConnection(db_config)
-conn = db_conn.connect()
-```
-
-#### Database-Specific Connection Examples
-
-**PostgreSQL:**
 ```python
 db_config = DatabaseConfig(
     type="postgres",
@@ -92,7 +102,8 @@ db_config = DatabaseConfig(
 )
 ```
 
-**MySQL:**
+### MySQL
+
 ```python
 db_config = DatabaseConfig(
     type="mysql",
@@ -108,65 +119,17 @@ db_config = DatabaseConfig(
 )
 ```
 
-**MongoDB:**
-```python
-# MongoDB Atlas (recommended)
-db_config = DatabaseConfig(
-    type="mongodb+srv",
-    dsn="mongodb+srv://user:pass@cluster.mongodb.net/database"
-)
-
-# Traditional MongoDB
-db_config = DatabaseConfig(
-    type="mongodb",
-    host="mongo.example.com",
-    port=27017,
-    user="mongo_user",
-    password="mongo_password",
-    database="app_database"
-)
-```
-
 ### Connection Features
 
 #### Automatic Driver Loading
 
-The system automatically loads the appropriate database driver based on the database type:
-
-```python
-# Driver automatically selected based on type
-db_conn = DatabaseConnection(db_config)  # Loads psycopg2 for postgres, pymysql for mysql, etc.
-```
+The system factory (`connectors.get_connector_class`) automatically loads the appropriate database driver based on the database type string (e.g., 'postgres', 'mysql').
 
 #### Autocommit Management
 
-Autocommit behavior is automatically configured based on database type and can be overridden:
-
-```python
-# Set autocommit explicitly
-db_conn.set_autocommit(True)
-
-# Or via configuration
-db_config = DatabaseConfig(
-    type="postgres",
-    # ... other config
-    options={"autocommit": False}
-)
-```
-
-#### Connection Timeout
-
-Configure connection timeouts globally or per-connection:
-
-```python
-# Global timeout via JRM configuration
-config = JrmConfig(
-    # ... databases
-    connect_timeout=30  # 30 seconds
-)
-
-# The timeout is automatically applied to all connections
-```
+Autocommit behavior is managed by the Pool:
+- **Transactions**: `pool.transaction()` automatically handles commit/rollback.
+- **Auto-mode**: Default clients are in autocommit mode.
 
 ## Connection Pooling
 
@@ -185,11 +148,6 @@ LongJRM provides a unified `Pool` interface with multiple backend implementation
    - Lightweight, high-performance pooling
    - Lower memory overhead
    - Simple connection management
-
-3. **MongoDB Pool** (`PoolBackend.MONGODB`)
-   - Native MongoDB connection pooling
-   - Automatic replica set handling
-   - Built-in connection recovery
 
 ### Basic Pool Usage
 
@@ -290,22 +248,16 @@ with pool.client() as client:
     #     "conn": <database_connection_object>,
     #     "database_type": "postgres",
     #     "database_name": "mydb", 
-    #     "db_lib": "psycopg2"
+    #     "db_lib": "psycopg"
     # }
     
     # Access the raw connection
     raw_connection = client["conn"]
     
-    # Database type for conditional logic
-    if client["database_type"] == "mongodb":
-        # MongoDB-specific operations
-        collection = client["conn"][client["database_name"]]["users"]
-        result = collection.find_one({"_id": "user123"})
-    else:
-        # SQL database operations
-        cursor = client["conn"].cursor()
-        cursor.execute("SELECT * FROM users WHERE id = %s", ("user123",))
-        result = cursor.fetchone()
+    # SQL database operations
+    cursor = client["conn"].cursor()
+    cursor.execute("SELECT * FROM users WHERE id = %s", ("user123",))
+    result = cursor.fetchone()
 ```
 
 ## Production Patterns
@@ -330,10 +282,7 @@ class DatabaseManager:
             db_config = require_db(db_name)
             
             # Choose backend based on database type
-            if db_config.type in ['mongodb', 'mongodb+srv']:
-                backend = PoolBackend.MONGODB
-            else:
-                backend = PoolBackend.SQLALCHEMY  # or DBUTILS for lighter weight
+            backend = PoolBackend.SQLALCHEMY  # or DBUTILS for lighter weight
                 
             self.pools[db_name] = Pool.from_config(db_config, backend)
             
@@ -484,51 +433,6 @@ db_config = DatabaseConfig(
 )
 ```
 
-### MongoDB
-
-#### Connection Configuration
-
-```python
-# MongoDB connection with replica set
-db_config = DatabaseConfig(
-    type="mongodb",
-    dsn="mongodb://user:pass@host1:27017,host2:27017,host3:27017/database?replicaSet=rs0&readPreference=secondaryPreferred"
-)
-
-# MongoDB Atlas
-db_config = DatabaseConfig(
-    type="mongodb+srv",
-    dsn="mongodb+srv://user:pass@cluster.mongodb.net/database?retryWrites=true&w=majority"
-)
-```
-
-#### MongoDB-Specific Usage
-
-```python
-# MongoDB connection usage
-pool = Pool.from_config(db_config, PoolBackend.MONGODB)
-
-with pool.client() as client:
-    mongo_client = client["conn"]
-    database = mongo_client[client["database_name"]]
-    
-    # Collection operations
-    users = database["users"]
-    
-    # Insert document
-    result = users.insert_one({"name": "John", "email": "john@example.com"})
-    
-    # Find documents
-    user = users.find_one({"_id": result.inserted_id})
-    
-    # Aggregation pipeline
-    pipeline = [
-        {"$match": {"status": "active"}},
-        {"$group": {"_id": "$department", "count": {"$sum": 1}}}
-    ]
-    results = list(users.aggregate(pipeline))
-```
-
 ## Error Handling
 
 ### Connection Errors
@@ -597,27 +501,17 @@ def test_real_database_connection():
     # Test each configured database
     for db_name in config.databases().keys():
         db_config = require_db(db_name)
-        
-        if db_config.type in ['mongodb', 'mongodb+srv']:
-            backend = PoolBackend.MONGODB
-        else:
-            backend = PoolBackend.SQLALCHEMY
+        backend = PoolBackend.SQLALCHEMY
             
         pool = Pool.from_config(db_config, backend)
         
         try:
             with pool.client() as client:
-                if db_config.type in ['mongodb', 'mongodb+srv']:
-                    # Test MongoDB connection
-                    mongo_client = client["conn"]
-                    result = mongo_client.admin.command('ping')
-                    assert result['ok'] == 1
-                else:
-                    # Test SQL connection
-                    cursor = client["conn"].cursor()
-                    cursor.execute("SELECT 1")
-                    result = cursor.fetchone()
-                    assert result[0] == 1
+                # Test SQL connection
+                cursor = client["conn"].cursor()
+                cursor.execute("SELECT 1")
+                result = cursor.fetchone()
+                assert result[0] == 1
                 
         finally:
             pool.dispose()
@@ -628,7 +522,7 @@ def test_real_database_connection():
 ### Common Issues
 
 1. **"No module named" errors**:
-   - Install required database drivers: `pip install psycopg2-binary pymysql pymongo`
+   - Install required database drivers: `pip install psycopg-binary pymysql`
    - Check driver mapping in `driver_map.json`
 
 2. **Connection timeout errors**:
@@ -671,18 +565,21 @@ def print_pool_status(pool):
 
 ### Core Classes
 
-#### DatabaseConnection
+#### BaseConnector
+
+Abstract base class for all database connectors.
 
 ```python
-class DatabaseConnection:
+class BaseConnector:
     def __init__(self, db_cfg: DatabaseConfig)
     def connect() -> Any  # Returns db-specific connection object
-    def set_autocommit(self, autocommit: bool) -> None
-    def set_isolation_level(self, isolation_level: str) -> None
-    def close() -> None
+    def get_cursor(conn) -> Any
+    def close(conn) -> None
 ```
 
 #### Pool
+
+The main entry point for connection management.
 
 ```python
 class Pool:
@@ -834,7 +731,6 @@ with pool.transaction() as tx:
 class PoolBackend(str, Enum):
     SQLALCHEMY = "sqlalchemy"
     DBUTILS = "dbutils"
-    MONGODB = "mongodb"
 ```
 
 ### Exceptions
