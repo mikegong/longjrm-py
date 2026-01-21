@@ -12,6 +12,7 @@ import re
 import datetime
 import logging
 import traceback
+from abc import ABC, abstractmethod
 from longjrm.config.runtime import get_config
 from longjrm.database.placeholder_handler import PlaceholderHandler
 from longjrm.connection.connectors import get_connector_class, unwrap_connection
@@ -20,7 +21,7 @@ from longjrm.utils import sql as sql_utils, data as data_utils
 
 logger = logging.getLogger(__name__)
 
-class Db:
+class Db(ABC):
     """
     Base database class for JSON Relational Mapping operations.
     
@@ -46,14 +47,17 @@ class Db:
     # Abstract methods - must be implemented by subclasses
     # -------------------------------------------------------------------------
     
+    @abstractmethod
     def get_cursor(self):
         """Get a cursor for executing queries. Subclasses must override."""
-        raise NotImplementedError("Subclass must implement get_cursor()")
+        ...
     
+    @abstractmethod
     def get_stream_cursor(self):
         """Get a cursor optimized for streaming large result sets. Subclasses must override."""
-        raise NotImplementedError("Subclass must implement get_stream_cursor()")
+        ...
 
+    @abstractmethod
     def _build_upsert_clause(self, key_columns, update_columns, for_values=True):
         """
         Build the database-specific UPSERT clause (ON CONFLICT, ON DUPLICATE KEY, etc.)
@@ -68,7 +72,7 @@ class Db:
         Returns:
             str: The database-specific upsert clause (e.g., "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name")
         """
-        raise NotImplementedError("Subclasses must implement _build_upsert_clause with database-specific syntax")
+        ...
 
     # -------------------------------------------------------------------------
     # Transaction control - uses connector methods for driver-specific handling

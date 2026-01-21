@@ -7,7 +7,7 @@ name = "longjrm"
 version = "0.1.0"
 description = "JRM Library for Python"
 authors = [
-    {name = "Mike Gong at LONGINFO"}
+    {name = "Mike Gong at LONGINFO", email="gongmike@gmail.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -24,6 +24,10 @@ dependencies = [
     "DBUtils>=3.0.3",
     "cryptography>=41.0.0",
 ]
+
+[project.urls]
+"Homepage" = "https://github.com/mikegong/longjrm-py"
+"Bug Tracker" = "https://github.com/mikegong/longjrm-py/issues"
 
 [project.optional-dependencies]
 mysql = ["PyMySQL>=1.1.0"]
