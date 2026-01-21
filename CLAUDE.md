@@ -425,11 +425,31 @@ Each database operation requires a "client" object containing:
 
 ### Adding New Database Support
 1. **Update Driver Mapping**: Add to `longjrm/connection/driver_map.json`
-2. **Implement Connection Logic**: Update `dbconn.py` with driver-specific logic
-3. **Handle SQL Variations**: Add database-specific patterns in `db.py`
-4. **Add Dependencies**: Include DB-API 2.0 compliant driver in `requirements.txt`
-5. **Create Tests**: Add test configuration and comprehensive test cases
-6. **Update Documentation**: Update README.md and CLAUDE.md
+2. **Create Database Subclass**: Create a new file in `longjrm/database/` that extends `Db` and implements all abstract methods:
+   ```python
+   from longjrm.database.db import Db
+   
+   class NewDb(Db):
+       def get_cursor(self):
+           """Return a cursor for query execution."""
+           return self.conn.cursor()
+       
+       def get_stream_cursor(self):
+           """Return a cursor for streaming large result sets."""
+           return self.conn.cursor()  # Or use server-side cursor
+       
+       def _build_upsert_clause(self, key_columns, update_columns, for_values=True):
+           """Return database-specific UPSERT clause."""
+           # Example: ON CONFLICT ... DO UPDATE or ON DUPLICATE KEY UPDATE
+           pass
+   ```
+3. **Register in Factory**: Update `longjrm/database/__init__.py` `get_db()` function
+4. **Handle SQL Variations**: Override methods like `_construct_select_sql()` if needed
+5. **Add Dependencies**: Include DB-API 2.0 compliant driver in `requirements.txt`
+6. **Create Tests**: Add test configuration and comprehensive test cases
+7. **Update Documentation**: Update README.md and CLAUDE.md
+
+**Note**: The `Db` class uses Python's ABC (Abstract Base Class). Failing to implement required abstract methods (`get_cursor`, `get_stream_cursor`, `_build_upsert_clause`) will cause a `TypeError` at class instantiation.
 
 **Supported DB-API 2.0 Databases** (easily added):
 SQLite, Oracle, SQL Server, IBM DB2, Firebird, and others following DB-API 2.0 standard.

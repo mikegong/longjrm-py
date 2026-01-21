@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **ABC Interface Pattern**: The `Db` class now inherits from Python's `ABC` (Abstract Base Class), providing:
+  - Compile-time enforcement of required methods via `@abstractmethod`
+  - Better IDE support with autocomplete for abstract methods
+  - Clear interface contracts for database adapter developers
+  - Required abstract methods: `get_cursor()`, `get_stream_cursor()`, `_build_upsert_clause()`
+
+---
+
 ## [0.1.0] - 2026-01-11
 
 ### Breaking Changes

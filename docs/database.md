@@ -30,6 +30,43 @@ from longjrm.database.db import Db
 db = Db(client)
 ```
 
+### ABC Interface Architecture
+
+The `Db` class uses Python's Abstract Base Class (ABC) pattern to enforce a formal interface contract. Database-specific implementations must inherit from `Db` and implement all abstract methods.
+
+**Required Abstract Methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `get_cursor()` | Return a cursor for query execution |
+| `get_stream_cursor()` | Return a cursor optimized for streaming large result sets |
+| `_build_upsert_clause()` | Return database-specific UPSERT syntax (ON CONFLICT, ON DUPLICATE KEY, etc.) |
+
+**Factory Pattern:**
+
+Use `get_db()` to automatically get the correct database-specific implementation:
+
+```python
+from longjrm.database import get_db
+
+# Automatically returns PostgresDb, MySQLDb, SqliteDb, etc.
+db = get_db(client)
+```
+
+**Implementation Hierarchy:**
+
+```
+Db (ABC)                    # Abstract base with CRUD operations
+├── PostgresDb              # PostgreSQL-specific (RETURNING, ON CONFLICT)
+├── MySQLDb                 # MySQL-specific (ON DUPLICATE KEY)
+├── SqliteDb                # SQLite-specific
+├── OracleDb                # Oracle-specific
+├── Db2Db                   # IBM DB2-specific (MERGE, partitions)
+├── SqlServerDb             # SQL Server-specific (TOP instead of LIMIT)
+├── SparkDb                 # Apache Spark SQL-specific
+└── GenericDb               # Fallback for any DB-API 2.0 driver
+```
+
 ## Current Implementation Status
 
 ### ✅ Implemented Features

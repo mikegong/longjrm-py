@@ -137,7 +137,7 @@ pip install -e .[sqlalchemy]
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/mikegong/longjrm-py.git
 cd longjrm-py
 
 # Install in development mode with all dependencies
@@ -166,7 +166,7 @@ python setup.py sdist bdist_wheel
 The library follows **12-Factor App** principles for configuration management, particularly **Factor III: Config**. Configuration can be provided through:
 
 1. **Environment Variables** (recommended for production)
-2. **Configuration Files** (suitable for development)
+2. **Configuration Files** (suitable for development or multiple databases environment)
 3. **Programmatic Configuration** (for testing and embedded applications)
 
 #### Environment-Based Configuration
@@ -441,6 +441,43 @@ The `Db` class provides JSON-based CRUD operations with:
 - Dynamic SQL generation with proper escaping
 - Support for SQL CURRENT keywords with backtick escaping
 - Placeholder handling varies by database library (`%s` for dbutils, `?` for others)
+
+### ABC Interface Pattern
+The `Db` class uses Python's Abstract Base Class (ABC) to enforce a formal interface contract:
+
+```python
+from abc import ABC, abstractmethod
+
+class Db(ABC):
+    @abstractmethod
+    def get_cursor(self):
+        """Required: Get execution cursor."""
+        ...
+    
+    @abstractmethod
+    def get_stream_cursor(self):
+        """Required: Get streaming cursor."""
+        ...
+    
+    @abstractmethod
+    def _build_upsert_clause(self, key_columns, update_columns, for_values=True):
+        """Required: Database-specific upsert syntax."""
+        ...
+```
+
+**Benefits:**
+- **Compile-time enforcement**: Missing implementations fail at class instantiation, not runtime
+- **IDE support**: Better autocomplete and type hints for abstract methods
+- **Clear contracts**: Explicit interface documentation for database adapter developers
+
+### Factory Pattern
+The `get_db()` factory function creates the appropriate database-specific instance:
+
+```python
+from longjrm.database import get_db
+
+db = get_db(client)  # Returns PostgresDb, MySQLDb, etc. based on database_type
+```
 
 ### Logging Strategy
 The library follows Python logging best practices:
