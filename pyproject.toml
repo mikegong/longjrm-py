@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "longjrm"
-version = "0.1.0"
+version = "0.1.1"
 description = "JRM Library for Python"
 authors = [
     {name = "Mike Gong at LONGINFO", email="gongmike@gmail.com"}
 ]
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 3 - Alpha",

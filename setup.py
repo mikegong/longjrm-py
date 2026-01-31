@@ -30,7 +30,7 @@ extras_require = {
 
 setup(
     name="longjrm",
-    version="0.1.0",
+    version="0.1.1",
     author="Mike Gong at LONGINFO",
     description="JRM Library for Python",
     packages=find_packages(),

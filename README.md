@@ -504,7 +504,7 @@ The library follows Python logging best practices:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Apache License 2.0](LICENSE).
 
 Developed by Mike Gong at LONGINFO.
 
