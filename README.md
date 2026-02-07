@@ -55,6 +55,7 @@ This innovative approach circumvents the limitations often encountered with trad
 - **Lightweight Design**: Minimal overhead compared to traditional ORMs
 - **Database Agnostic**: Consistent API across different database types
 - **Automatic Connection Management**: Context manager pattern for safe resource handling
+- **Session Context Support**: Pass variables like `user_id` to connection sessions for RLS or auditing
 
 ## Advanced Features
 

@@ -236,6 +236,22 @@ pool = Pool.from_config(
 )
 ```
 
+
+### Session Context & Row Level Security
+
+You can pass context variables to `pool.client()` which are used to format the configured `session_setup` SQL command. This is particularly useful for setting session-local variables (like `app.current_user_id` in PostgreSQL) for Row Level Security (RLS) or audit logging.
+
+```python
+# Assuming config: 
+# "session_setup": "SET app.user_id = '{user_id}'",
+# "session_teardown": "RESET app.user_id"
+
+with pool.client(user_id=1001) as client:
+    # app.user_id is set to '1001' for this block
+    db = Db(client)
+    # ... connection is automatically reset on exit
+```
+
 ### Pool Client Structure
 
 Pool clients provide a standardized interface across all database types:

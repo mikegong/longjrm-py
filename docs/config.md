@@ -578,11 +578,30 @@ LongJRM supports the following `type` values:
 - `spark`
 - Any generic DB-API 2.0 driver name
 
+### Session Configuration
+
+You can configure SQL commands to run automatically when a connection is checked out (`session_setup`) and returned (`session_teardown`). This is useful for setting session variables like user IDs for Row-Level Security (RLS).
+
+```json
+{
+  "postgres-rls": {
+    "type": "postgres",
+    "dsn": "...",
+    "session_setup": "SET app.current_user_id = '{user_id}'",
+    "session_teardown": "RESET app.current_user_id"
+  }
+}
+```
+
+The `session_setup` string supports Python-style formatting (e.g., `{user_id}`) using values passed to `pool.client(**context)`.
+
 ### Configuration Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `default_db` | `str` | `None` | Default database key |
+| `session_setup` | `str` | `None` | SQL to execute on connection checkout (supports `{var}` formatting) |
+| `session_teardown` | `str` | `None` | SQL to execute on connection return |
 | `jrm_connect_timeout` | `int` | `40` | Connection timeout (seconds) |
 | `jrm_data_fetch_limit` | `int` | `1000` | Maximum rows per query |
 | `jrm_min_pool_size` | `int` | `1` | Minimum connection pool size |

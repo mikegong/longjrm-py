@@ -13,8 +13,6 @@ from longjrm.database import get_db
 logger = logging.getLogger(__name__)
 
 
-
-
 class TransactionContext:
     """
     Context object for transaction operations.
@@ -41,7 +39,6 @@ class TransactionContext:
         except Exception as e:
             logger.error(f"Manual rollback failed: {e}")
             raise
-
 
 
 class PoolBackend(str, Enum):
@@ -273,12 +270,12 @@ class Pool:
             logger.warning(f"Failed to close connection {self._b._cfg.type} to '{self._b._cfg.database}'. Error: {e}")
 
     @contextmanager
-    def client(self) -> Generator[Dict[str, Any], None, None]:
+    def client(self, **context) -> Generator[Dict[str, Any], None, None]:
         """
         Context manager for automatic client checkout/checkin.
 
         Usage:
-            with pool.client() as client:
+            with pool.client(user_id=123) as client:
                 db = Db(client)
                 result = db.select("users", ["*"])
                 # client automatically returned to pool on exit
@@ -286,9 +283,34 @@ class Pool:
         client = None
         try:
             client = self._get_client()
+            
+            # SESSION SETUP
+            if self.config.session_setup:
+                try:
+                    setup_query = self.config.session_setup.format(**context)
+                    if hasattr(client['conn'], 'cursor'):
+                       with client['conn'].cursor() as cur:
+                           cur.execute(setup_query)
+                    elif hasattr(client['conn'], 'execute'): # SQLAlchemy connection
+                       client['conn'].execute(setup_query)
+                except Exception as e:
+                    logger.error(f"Session setup failed: {e}")
+                    raise
+
             yield client
         finally:
             if client is not None:
+                # SESSION TEARDOWN (handled before close)
+                if self.config.session_teardown:
+                    try:
+                        if hasattr(client['conn'], 'cursor'):
+                           with client['conn'].cursor() as cur:
+                               cur.execute(self.config.session_teardown)
+                        elif hasattr(client['conn'], 'execute'):
+                           client['conn'].execute(self.config.session_teardown)
+                    except Exception as e:
+                        logger.warning(f"Session teardown failed: {e}")
+
                 self.close_client(client)
 
     @contextmanager

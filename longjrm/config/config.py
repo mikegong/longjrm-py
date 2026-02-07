@@ -57,6 +57,8 @@ class DatabaseConfig:
     port: int | None = None
     database: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    session_setup: str | None = None
+    session_teardown: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "DatabaseConfig":
@@ -93,6 +95,8 @@ class DatabaseConfig:
             port=d.get("port"),
             database=d.get("database"),
             options=d.get("options", {}) or {},
+            session_setup=d.get("session_setup"),
+            session_teardown=d.get("session_teardown"),
         )
 
 @dataclass(frozen=True, slots=True)
