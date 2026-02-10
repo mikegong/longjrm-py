@@ -895,7 +895,7 @@ class Db(ABC):
         sql = f"DELETE FROM {table}{where_str}"
         return sql, where_values
 
-    def merge(self, table, data, key_columns):
+    def merge(self, table, data, key_columns, no_update=None):
         """
         Merge (upsert) data in JSON format into table
         This function performs an INSERT if the record doesn't exist based on key_columns,
@@ -906,6 +906,7 @@ class Db(ABC):
             data: JSON data with column-value pairs {"col1": "val1", "col2": "val2"}
                   Can be a single record (dict) or list of records (list of dicts)
             key_columns: list of column names that define uniqueness for matching records
+            no_update: if True, do nothing on conflict (effectively "INSERT OR IGNORE")
         Returns:
             dictionary with status, message, data (empty), and count (affected rows)
         """
@@ -924,19 +925,19 @@ class Db(ABC):
         
         # Handle both single record and bulk merge
         if isinstance(data, list):
-            return self._bulk_merge(table, data, key_columns)
+            return self._bulk_merge(table, data, key_columns, no_update=no_update)
         else:
-            return self._single_merge(table, data, key_columns)
+            return self._single_merge(table, data, key_columns, no_update=no_update)
 
-    def _single_merge(self, table, data, key_columns):
+    def _single_merge(self, table, data, key_columns, no_update=None):
         """
         Merge a single record into the table
         """
         # construct merge/upsert SQL
-        merge_query, arr_values = self._merge_constructor(table, data, key_columns)
+        merge_query, arr_values = self._merge_constructor(table, data, key_columns, no_update=no_update)
         return self.execute(merge_query, arr_values)
 
-    def _bulk_merge(self, table, data_list, key_columns):
+    def _bulk_merge(self, table, data_list, key_columns, no_update=None):
         """
         Merge multiple records into the table using batch execution.
         
@@ -947,6 +948,7 @@ class Db(ABC):
             table: target table name
             data_list: list of records (dicts) to merge
             key_columns: list of column names that define uniqueness
+            no_update: if True, do nothing on conflict
             
         Returns:
             dictionary with status, message, data (empty), and count (affected rows)
@@ -966,7 +968,7 @@ class Db(ABC):
             
             # Generate SQL and collect values for all records
             for i, record in enumerate(data_list):
-                sql, values = self._merge_constructor(table, record, key_columns)
+                sql, values = self._merge_constructor(table, record, key_columns, no_update=no_update)
                 
                 if sql_template is None:
                     sql_template = sql
@@ -1001,7 +1003,7 @@ class Db(ABC):
             if cur:
                 cur.close()
 
-    def _merge_constructor(self, table, data, key_columns):
+    def _merge_constructor(self, table, data, key_columns, no_update=None):
         """
         Construct SQL MERGE/UPSERT statement from JSON data.
         
@@ -1012,6 +1014,7 @@ class Db(ABC):
             table: target table name
             data: JSON data with column-value pairs
             key_columns: list of column names for matching
+            no_update: if True, do nothing on conflict
         Returns:
             tuple of (sql_query, values_array)
         """
@@ -1033,7 +1036,10 @@ class Db(ABC):
         str_placeholders = ', '.join(placeholders)
         
         # Determine update columns (all non-key columns)
-        update_columns = [col for col in columns if col not in key_columns]
+        if no_update:
+            update_columns = []
+        else:
+            update_columns = [col for col in columns if col not in key_columns]
         
         # Get database-specific upsert clause from subclass
         upsert_clause = self._build_upsert_clause(key_columns, update_columns, for_values=True)

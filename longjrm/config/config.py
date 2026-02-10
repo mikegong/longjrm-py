@@ -57,6 +57,8 @@ class DatabaseConfig:
     port: int | None = None
     database: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    session_setup: str | None = None
+    session_teardown: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "DatabaseConfig":
@@ -93,6 +95,8 @@ class DatabaseConfig:
             port=d.get("port"),
             database=d.get("database"),
             options=d.get("options", {}) or {},
+            session_setup=d.get("session_setup"),
+            session_teardown=d.get("session_teardown"),
         )
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +236,18 @@ class JrmConfig:
         if not dbs_map:
             raise JrmConfigurationError("No database configurations found in environment")
 
-        parsed = {name: DatabaseConfig.from_dict(cfg) for name, cfg in dbs_map.items()}
+        parsed = {}
+        session_setup = get(prefix + "SESSION_SETUP")
+        session_teardown = get(prefix + "SESSION_TEARDOWN")
+        
+        for name, cfg in dbs_map.items():
+            # Inject session setup/teardown if not present in config and available in env
+            if session_setup and "session_setup" not in cfg:
+                cfg["session_setup"] = session_setup
+            if session_teardown and "session_teardown" not in cfg:
+                cfg["session_teardown"] = session_teardown
+            
+            parsed[name] = DatabaseConfig.from_dict(cfg)
 
         def _f(name: str, default: float) -> float:
             v = get(prefix + name)
