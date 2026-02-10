@@ -511,4 +511,4 @@ Developed by Mike Gong at LONGINFO.
 
 ## Documentation
 
-All the documentation was compiled with assistance from Gemini 3.5 Pro, Claude Opus 4.5, and Claude Sonnet 4.
+All the documentation was compiled with assistance from Gemini 3 Pro, Claude Opus 4.5, and Claude Sonnet 4.
