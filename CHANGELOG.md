@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Session Setup Support**: Added support for `session_setup` and `session_teardown` in database configuration, enabling PostgreSQL Row Level Security (RLS) and custom session initialization.
 - **No-Update Merge**: Added `no_update` parameter to `merge` operation, enabling the ability to skip updates if a record already exists.
 
+## [0.1.1] - 2026-01-31
+
 ### Changed
 
 - **License Change**: Changed project license from MIT to Apache License 2.0.
