@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-05-11
+
 ### Fixed
 
 - **MySQL `port` ignored**: `MySQLConnector` was not forwarding `port` to `pymysql.connect()`, so non-default ports were silently dropped. Now passed correctly.
@@ -28,11 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - DB2: `ConnectTimeout` (in ibm_db connection string)
   - SQLite: **not mapped** — sqlite3's `timeout` is a busy-lock timeout with different semantics; set it explicitly via `options.timeout` if needed.
 
----
-
-## [0.2.0] - 2026-05-07
-
-### Added
+### Added — Async API
 
 - **Async API (Phase 1 + Phase 2)**: First-class support for using longjrm inside event-loop frameworks (FastAPI, aiohttp, Sanic, Starlette) without manually wrapping every call in `run_in_threadpool`.
   - New `AsyncDb` class in `longjrm.database.async_db`. Methods mirror `Db` 1:1 in name, parameters, and return shape — only the return type changes from `T` to `Awaitable[T]`.
