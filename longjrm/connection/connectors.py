@@ -20,6 +20,13 @@ class JrmConnectionError(Exception):
 class BaseConnector:
     """Base class for database connectors."""
 
+    # Options that subclasses may forward to their driver. Subclasses override.
+    # NOTE: 'connect_timeout' is intentionally never in this set — it is
+    # resolved into self.connect_timeout below and each connector maps it to
+    # its driver's own parameter name (e.g. tcp_connect_timeout for Oracle,
+    # timeout for pyodbc, ConnectTimeout for ibm_db).
+    _PASSTHROUGH: set[str] = set()
+
     def __init__(self, db_cfg: DatabaseConfig):
         """
         Initialize connector from DatabaseConfig.
@@ -49,11 +56,24 @@ class BaseConnector:
             self.options = db_cfg.options
 
         jrm_cfg = get_config()
-        self.connect_timeout = jrm_cfg.connect_timeout
+        # options.connect_timeout (per-database) overrides JrmConfig (global)
+        try:
+            self.connect_timeout = int(self.options.get("connect_timeout", jrm_cfg.connect_timeout))
+        except (TypeError, ValueError):
+            self.connect_timeout = jrm_cfg.connect_timeout
 
         # Load driver info
         driver_info = load_driver_map().get((db_cfg.type or "").lower())
         self.database_module = driver_info.dbapi if driver_info else None
+
+    def _filter_options(self, allowlist) -> dict:
+        """
+        Return a kwargs dict of options whose keys are in `allowlist`.
+        'connect_timeout' is never forwarded by name — it is mapped per-driver
+        via self.connect_timeout in each subclass's connect().
+        """
+        return {k: v for k, v in (self.options or {}).items()
+                if k in allowlist and k != "connect_timeout"}
 
     def connect(self):
         raise NotImplementedError
@@ -74,18 +94,40 @@ class BaseConnector:
         logger.warning(f"Isolation level setting not implemented for {type(conn).__name__}")
 
 class PostgresConnector(BaseConnector):
+    # libpq parameters worth forwarding from `options`. See:
+    # https://www.postgresql.org/docs/current/libpq-connect.html
+    _PASSTHROUGH = {
+        "sslmode", "sslrootcert", "sslcert", "sslkey", "sslpassword", "sslcrl",
+        "channel_binding", "gssencmode", "krbsrvname", "gsslib", "requirepeer",
+        "client_encoding", "application_name", "fallback_application_name",
+        "keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count",
+        "tcp_user_timeout", "target_session_attrs",
+        "service", "passfile", "options", "replication",
+        "load_balance_hosts", "hostaddr",
+    }
+
     def connect(self):
         import psycopg
         port = f":{self.port}" if self.port else ''
         connection_msg = f"Connected to the postgres database '{self.database}' at {self.host}{port}"
-        
-        if not self.dsn:
-            sslmode = self.options.get('sslmode', 'prefer')
-            dsn = f"host={self.host} port={self.port} dbname={self.database} user={self.user} password={self.password} connect_timeout={self.connect_timeout} sslmode={sslmode}"
+
+        if self.dsn:
+            # DSN already carries its own query-string options; psycopg/libpq parses them.
+            conn = psycopg.connect(self.dsn, autocommit=self.autocommit)
         else:
-            dsn = self.dsn
-            
-        conn = psycopg.connect(dsn, autocommit=self.autocommit)
+            kwargs = self._filter_options(self._PASSTHROUGH)
+            kwargs.setdefault("sslmode", "prefer")
+            kwargs.update({
+                "host": self.host,
+                "port": self.port,
+                "dbname": self.database,
+                "user": self.user,
+                "password": self.password,
+                "connect_timeout": self.connect_timeout,
+            })
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            conn = psycopg.connect(autocommit=self.autocommit, **kwargs)
+
         logger.info(f"{connection_msg}, connection status: {conn.info.status.name}")
         return conn
 
@@ -99,22 +141,42 @@ class PostgresConnector(BaseConnector):
 
 
 class MySQLConnector(BaseConnector):
+    # PyMySQL connect() kwargs worth forwarding from `options`.
+    _PASSTHROUGH = {
+        "charset", "sql_mode", "use_unicode", "client_flag", "init_command",
+        "ssl", "ssl_ca", "ssl_cert", "ssl_key", "ssl_disabled",
+        "ssl_verify_cert", "ssl_verify_identity",
+        "read_timeout", "write_timeout", "bind_address",
+        "program_name", "max_allowed_packet", "compress",
+        "unix_socket", "auth_plugin_map", "binary_prefix",
+        "read_default_file", "read_default_group",
+        "server_public_key", "defer_connect",
+    }
+
     def connect(self):
         import pymysql
         port = f":{self.port}" if self.port else ''
         connection_msg = f"Connected to the mysql database '{self.database}' at {self.host}{port}"
-        
+
         # PyMySQL 1.1.x requires a callable for local_infile that returns a file handle
         def local_infile_handler(filename):
             return open(filename, 'rb')
-        
-        conn = pymysql.connect(host=self.host,
-                             user=self.user,
-                             password=self.password,
-                             database=self.database,
-                             connect_timeout=self.connect_timeout,
-                             autocommit=self.autocommit,
-                             local_infile=local_infile_handler)
+
+        kwargs = self._filter_options(self._PASSTHROUGH)
+        kwargs.update({
+            "host": self.host,
+            "user": self.user,
+            "password": self.password,
+            "database": self.database,
+            "connect_timeout": self.connect_timeout,
+            "autocommit": self.autocommit,
+            "local_infile": local_infile_handler,
+        })
+        if self.port:
+            kwargs["port"] = int(self.port)
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+        conn = pymysql.connect(**kwargs)
         logger.info(f"{connection_msg}, connection thread: {conn.thread_id()}")
         return conn
 
@@ -140,10 +202,20 @@ class MySQLConnector(BaseConnector):
 
 
 class SqliteConnector(BaseConnector):
+    # sqlite3.connect kwargs. NOTE: 'timeout' here is the busy-lock timeout,
+    # NOT a network/connection timeout — semantics differ from other drivers.
+    # JrmConfig.connect_timeout has no analog in sqlite3 and is intentionally
+    # not mapped; users who need busy-lock timeout should set options.timeout.
+    _PASSTHROUGH = {
+        "timeout", "detect_types", "check_same_thread",
+        "cached_statements", "uri",
+    }
+
     def connect(self):
         import sqlite3
         db_path = self.database or ':memory:'
-        conn = sqlite3.connect(db_path)
+        kwargs = self._filter_options(self._PASSTHROUGH)
+        conn = sqlite3.connect(db_path, **kwargs)
         if self.autocommit:
             conn.isolation_level = None
         logger.info(f"Connected to SQLite database: {db_path}")
@@ -172,26 +244,42 @@ class SqliteConnector(BaseConnector):
 
 
 class Db2Connector(BaseConnector):
+    # IBM CLI keywords forwarded into the connection string. Keys are
+    # case-insensitive in DB2 CLI; we keep canonical IBM casing.
+    _PASSTHROUGH = {
+        "SECURITY", "AUTHENTICATION", "CURRENTSCHEMA",
+        "SSLClientKeystoreDB", "SSLClientKeystash", "SSLServerCertificate",
+        "QueryTimeoutInterval",
+        "PROGRAMNAME", "BLOCKING_OTHER_TXN", "ARRAYSIZE",
+        "ClientAccountingInformation", "ClientApplicationInformation",
+        "ClientHostname", "ClientUser",
+        "AccountingInformation",
+    }
+
     def connect(self):
         fix_ibm_db_dll()
         import ibm_db_dbi
         port = f":{self.port}" if self.port else ''
         connection_msg = f"Connected to the db2 database '{self.database}' at {self.host}{port}"
-        
+
         # Construct DSN-like string for ibm_db_dbi
-        conn_str = (
-            f"DATABASE={self.database};"
-            f"HOSTNAME={self.host};"
-            f"PORT={self.port};"
-            f"PROTOCOL=TCPIP;"
-            f"UID={self.user};"
-            f"PWD={self.password};"
-        )
-        
+        parts = [
+            f"DATABASE={self.database}",
+            f"HOSTNAME={self.host}",
+            f"PORT={self.port}",
+            "PROTOCOL=TCPIP",
+            f"UID={self.user}",
+            f"PWD={self.password}",
+            f"ConnectTimeout={self.connect_timeout}",
+        ]
+        for k, v in self._filter_options(self._PASSTHROUGH).items():
+            parts.append(f"{k}={v}")
+        conn_str = ";".join(parts) + ";"
+
         conn = ibm_db_dbi.connect(conn_str, "", "")
-        
+
         conn.set_autocommit(self.autocommit)
-            
+
         logger.info(f"{connection_msg}")
         return conn
 
@@ -201,16 +289,26 @@ class Db2Connector(BaseConnector):
 
 
 class OracleConnector(BaseConnector):
+    # oracledb.connect kwargs worth forwarding from `options`.
+    # 'service_name' is consumed locally to build the easy-connect DSN, not forwarded.
+    _PASSTHROUGH = {
+        "mode", "events", "edition", "purity", "cclass", "tag", "matchanytag",
+        "encoding", "nencoding", "externalauth",
+        "wallet_location", "wallet_password",
+        "https_proxy", "https_proxy_port",
+        "expire_time", "retry_count", "retry_delay",
+        "ssl_server_dn_match", "ssl_server_cert_dn",
+        "config_dir", "appcontext", "shardingkey", "supershardingkey",
+        "stmtcachesize", "disable_oob",
+    }
+
     def connect(self):
         import oracledb
         # Fetch LOBs (CLOB, BLOB) as strings/bytes directly
         oracledb.defaults.fetch_lobs = False
-        
+
         # Connection string construction for Oracle
         # Supports both Thin and Thick modes automatically via oracledb
-        
-        dsn_str = None
-        dsn_str = None
         if self.dsn:
             dsn_str = self.dsn
         elif self.host:
@@ -218,32 +316,43 @@ class OracleConnector(BaseConnector):
             service_name = self.options.get('service_name', self.database)
             # Easy Connect syntax: host:port/service_name
             dsn_str = f"{self.host}:{port}/{service_name}"
-            
+        else:
+            dsn_str = None
+
         logger.info(f"Connecting to Oracle database at {self.host}")
-        
+
+        kwargs = self._filter_options(self._PASSTHROUGH)
+        kwargs.update({
+            "user": self.user,
+            "password": self.password,
+            "dsn": dsn_str,
+            "tcp_connect_timeout": self.connect_timeout,
+        })
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
         try:
-            # Attempt connection
-            conn = oracledb.connect(
-                user=self.user,
-                password=self.password,
-                dsn=dsn_str
-            )
-            
+            conn = oracledb.connect(**kwargs)
+
             conn.autocommit = self.autocommit
             logger.info(f"Connected to Oracle database via oracledb")
             return conn
-            
+
         except Exception as e:
             logger.error(f"Failed to connect to Oracle: {e}")
             raise e
 
 
 class SqlServerConnector(BaseConnector):
+    # pyodbc.connect() kwargs (NOT inlined into the connection string).
+    _PYODBC_KWARGS = {"ansi", "readonly", "encoding", "attrs_before"}
+    # Keys consumed by this connector itself (don't inline, don't forward).
+    _LOCAL_KEYS = {"driver", "connect_timeout", "autocommit"}
+
     def connect(self):
         import pyodbc
-        
+
         driver = self.options.get('driver', '{ODBC Driver 17 for SQL Server}')
-        
+
         if self.dsn:
             conn_str = self.dsn
         else:
@@ -255,15 +364,24 @@ class SqlServerConnector(BaseConnector):
                 f"UID={self.user};"
                 f"PWD={self.password}"
             )
-            # Add extra options
+            # Inline any other ODBC connection-string keys (Encrypt, TrustServerCertificate, ...)
             for k, v in self.options.items():
-                if k != 'driver':
-                    conn_str += f";{k}={v}"
-                    
+                if k in self._LOCAL_KEYS or k in self._PYODBC_KWARGS:
+                    continue
+                conn_str += f";{k}={v}"
+
+        connect_kwargs = {
+            "autocommit": self.autocommit,
+            "timeout": self.connect_timeout,  # pyodbc login timeout, in seconds
+        }
+        for k in self._PYODBC_KWARGS:
+            if k in self.options:
+                connect_kwargs[k] = self.options[k]
+
         logger.info(f"Connecting to SQL Server at {self.host}")
-        
+
         try:
-            conn = pyodbc.connect(conn_str, autocommit=self.autocommit)
+            conn = pyodbc.connect(conn_str, **connect_kwargs)
             logger.info(f"Connected to SQL Server via pyodbc")
             return conn
         except Exception as e:

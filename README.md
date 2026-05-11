@@ -51,6 +51,7 @@ This innovative approach circumvents the limitations often encountered with trad
 - **Multi-Database Support**: Unified interface for MySQL, PostgreSQL, and more databases that support DB-API 2.0
 - **JSON-Based Operations**: Direct JSON input/output for database operations
 - **Connection Pooling**: Efficient connection management with DBUtils, SQLAlchemy, and Spark pooling backends
+- **Sync + Async API**: Use `get_db()` / `pool.client()` from sync code, `get_async_db()` / `pool.aclient()` from `async def` (FastAPI / aiohttp / Sanic). Both can coexist in the same process — see [Async Usage](#async-usage-fastapi--aiohttp--sanic).
 - **Configuration Management**: Flexible configuration via JSON files or environment variables
 - **Lightweight Design**: Minimal overhead compared to traditional ORMs
 - **Database Agnostic**: Consistent API across different database types
@@ -327,6 +328,257 @@ db.stream_to_csv(
     options={"header": "Y", "batch_size": 5000}
 )
 ```
+
+## Async Usage (FastAPI / aiohttp / Sanic)
+
+Starting with **0.2.0**, longjrm exposes an async-friendly API alongside the
+synchronous one. It is designed for callers that already live inside an event
+loop (FastAPI, aiohttp, Sanic, Starlette) so they don't have to wrap every
+call in `run_in_threadpool` themselves.
+
+### How it works
+
+This is **threadpool-backed async**: the underlying drivers (psycopg, pymysql,
+oracledb, pyodbc, ibm_db, sqlite3) remain synchronous, and `AsyncDb`
+dispatches each call through `asyncio.to_thread` so the event loop stays
+unblocked. Behavior, return shape, and error semantics mirror the sync API
+exactly — the only difference is that methods return awaitables.
+
+> For C10K-class throughput, evaluate a native async driver (asyncpg,
+> `psycopg.AsyncConnection`, aiomysql) directly. longjrm's async API
+> trades raw throughput for ergonomic parity with the sync API and
+> support for every database the sync API supports.
+
+### Choosing sync vs async
+
+| Use the sync API (`get_db` / `pool.client()`) | Use the async API (`get_async_db` / `pool.aclient()`) |
+|---|---|
+| CLI tools, scripts, cron jobs | FastAPI / aiohttp / Sanic / Starlette routes |
+| ETL / batch / data engineering | aiogram bots, websocket handlers |
+| Django views, Flask, sync workers | Anything running inside an `async def` |
+| Spark workloads | Mixed apps: route in async, worker in sync |
+
+Both can coexist in a single process without conflict — the choice is at the
+call site, not a global flag.
+
+### Async API quickstart
+
+```python
+import asyncio
+from longjrm.config.config import DatabaseConfig
+from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.database import get_async_db
+
+config = DatabaseConfig(type="postgres", host="localhost",
+                        user="app", password="...", database="mydb")
+pool = Pool.from_config(config, PoolBackend.DBUTILS)
+
+async def main():
+    async with pool.aclient() as client:
+        db = get_async_db(client)
+        await db.insert("users", {"name": "Alice", "email": "a@x.io"})
+        result = await db.select("users", ["id", "name"], {"name": "Alice"})
+        print(result["data"])
+
+asyncio.run(main())
+pool.dispose()
+```
+
+### Async transactions
+
+```python
+async with pool.atransaction() as tx:
+    db = get_async_db(tx.client)
+    await db.insert("orders", {"user_id": 1, "total": 99.99})
+    await db.update("inventory", {"stock": "`stock - 1`"}, {"sku": "A1"})
+    # Auto-commit on success, auto-rollback on exception
+```
+
+### FastAPI integration
+
+```python
+from fastapi import FastAPI, Depends
+from longjrm.connection.pool import Pool, PoolBackend
+from longjrm.database import get_async_db
+
+pool = Pool.from_config(...)
+app = FastAPI()
+
+@app.on_event("shutdown")
+def _close(): pool.dispose()
+
+@app.get("/users/{user_id}")
+async def get_user(user_id: int):
+    async with pool.aclient() as client:
+        db = get_async_db(client)
+        result = await db.select("users", ["*"], {"id": user_id})
+        return result["data"][0] if result["count"] else {"error": "not found"}
+```
+
+### Streaming reads (async iterator)
+
+`stream_query()` / `stream_query_batch()` return an async iterator that
+fetches rows one at a time without buffering the whole result set:
+
+```python
+async with pool.aclient() as client:
+    db = get_async_db(client)
+
+    # Row-by-row
+    async for row_num, row, status in db.stream_query(
+        "SELECT * FROM big_table"
+    ):
+        if status == 0:
+            await process(row)
+
+    # Or in batches (e.g. 500 rows per chunk)
+    async for total, batch, status in db.stream_query_batch(
+        "SELECT * FROM big_table", batch_size=500,
+    ):
+        await process_batch(batch)
+```
+
+The iterator holds the AsyncDb's internal lock for the lifetime of
+iteration (the underlying DB-API cursor cannot be shared). The lock is
+auto-released on exhaustion, on `break`, or on exception via the
+adapter's `aclose()`.
+
+### Streaming writes
+
+`stream_insert()` / `stream_update()` / `stream_merge()` accept a
+**synchronous** iterable / generator and consume it in a worker thread
+with periodic commits:
+
+```python
+def rows_from_csv():
+    with open("data.csv") as f:
+        for line in f:
+            yield {"name": line.strip()}
+
+async with pool.aclient() as client:
+    db = get_async_db(client)
+    await db.stream_insert(rows_from_csv(), "users", commit_count=10000)
+```
+
+Async iterables are not directly supported as the `stream` argument; if
+your data source is async, materialize it first or use
+`asyncio.to_thread` yourself.
+
+### Concurrency rules
+
+A single `AsyncDb` instance wraps a single DB-API connection, and DB-API
+connections are not safe to use from multiple threads/coroutines
+concurrently. `AsyncDb` enforces this with an internal `asyncio.Lock`:
+
+```python
+async with pool.aclient() as client:
+    db = get_async_db(client)
+    # OK — serialized by the internal lock (slower, but safe)
+    a, b = await asyncio.gather(db.query(sql1), db.query(sql2))
+```
+
+For real concurrency, check out one client per branch:
+
+```python
+async def fetch(sql):
+    async with pool.aclient() as client:
+        return await get_async_db(client).query(sql)
+
+a, b = await asyncio.gather(fetch(sql1), fetch(sql2))   # truly parallel
+```
+
+### Using the sync API inside an async framework (alternative pattern)
+
+If you only have a couple of DB calls inside an `async def` route and don't
+want the async API, you can still use the sync API correctly — the rule is:
+**never call sync DB methods directly inside `async def`**. Two safe
+patterns:
+
+**1. Pure sync endpoint (preferred when you don't `await` anything else)**
+
+FastAPI auto-dispatches sync `def` endpoints to a worker thread pool, so
+calling sync longjrm directly is safe — the event loop is never on the
+hook.
+
+```python
+from fastapi import FastAPI
+from longjrm.database import get_db
+
+app = FastAPI()
+
+@app.get("/users/{user_id}")
+def get_user(user_id: int):                # note: def, not async def
+    with pool.client() as client:
+        db = get_db(client)
+        result = db.select("users", ["*"], {"id": user_id})
+    return result["data"]
+```
+
+**2. Wrap sync calls with `run_in_threadpool` (when the route must be async)**
+
+If the route is `async def` for other reasons (e.g. it `await`s an HTTP
+client or Redis), use Starlette's `run_in_threadpool` to keep the loop free:
+
+```python
+from starlette.concurrency import run_in_threadpool
+from longjrm.database import get_db
+
+@app.get("/users/{user_id}")
+async def get_user(user_id: int):
+    payload = await some_external_api(user_id)            # real await
+
+    def _db_work():
+        with pool.client() as client:
+            db = get_db(client)
+            return db.select("users", ["*"], {"id": user_id})
+
+    result = await run_in_threadpool(_db_work)
+    return {"user": result["data"][0], "extra": payload}
+```
+
+> **Anti-pattern — never do this.** Calling sync longjrm methods directly
+> inside an `async def` blocks the event loop for the entire duration of
+> the SQL, which freezes every other in-flight request, websocket, and
+> background task in the same worker:
+>
+> ```python
+> @app.get("/bad")
+> async def bad():
+>     with pool.client() as client:        # ❌ blocks the event loop
+>         db = get_db(client)
+>         return db.select("users", ["*"])
+> ```
+
+### Worker thread tuning
+
+`asyncio.to_thread` uses the default `ThreadPoolExecutor`, whose default
+worker count is `min(32, os.cpu_count() + 4)`. For DB-bound async workloads,
+you may want to raise this in `main()` before spawning tasks:
+
+```python
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+async def main():
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=64))
+    # ... rest of your async app
+```
+
+FastAPI/Starlette use anyio's separate threadpool for sync `def` endpoints
+— the asyncio default executor used by `to_thread` is independent and does
+not contend with it.
+
+### Known limitations
+
+- **SQLite + SQLAlchemy `SingletonThreadPool`** is not compatible with
+  threadpool dispatch (SQLite connections are thread-bound by default; the
+  singleton pool keeps them on a single thread). For SQLite under async,
+  use the **DBUtils** backend.
+- **Spark** does not have an async API in this release; Spark itself owns
+  scheduling and concurrency.
+
+---
 
 ## Dependencies
 

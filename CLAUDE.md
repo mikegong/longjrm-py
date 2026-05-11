@@ -3,13 +3,14 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ##- **Project Name**: longjrm-py
-- **Version**: 0.1.0
+- **Version**: 0.2.0
 - **Description**: A generic JSON Relational Mapping (JRM) library for Python 3.10+ that wraps SQL CRUD operations via DB-API 2.0.
 - **Key Features**:
     - Database-oriented CRUD (insert, select, update, delete, merge)
     - **Connector Factory** architecture for dynamic DB support
     - JSON-based data and query structures
     - Connection pooling (via DBUtils 2/3 or SQLAlchemy)
+    - **Sync + Async API** in one library: `Db` / `Pool.client()` for sync code, `AsyncDb` / `Pool.aclient()` for FastAPI / aiohttp / Sanic
     - **Streaming** support for queries and transactional inserts
     - **Bulk Load** and **Partition** management (DB2/Postgres specific)
     - 12-Factor App configuration compliance
@@ -33,6 +34,75 @@ The library supports multiple database types through a unified interface:
 - **Spark SQL** (via pyspark)
 
 **Extensible Architecture**: Easily supports additional databases implementing Python DB-API 2.0 (PEP 249). Database driver mappings are defined in `longjrm/connection/driver_map.json`.
+
+## Async API (since 0.2.0)
+
+longjrm exposes an async-friendly API alongside the sync one. Both can
+coexist in the same process without conflict — the choice is at the call
+site, not a global flag.
+
+```python
+# Synchronous (unchanged from 0.1.x)
+from longjrm.database import get_db
+with pool.client() as client:
+    db = get_db(client)
+    rows = db.query("SELECT ...")
+
+# Async (FastAPI / aiohttp / Sanic — new in 0.2.0)
+from longjrm.database import get_async_db
+async with pool.aclient() as client:
+    db = get_async_db(client)
+    rows = await db.query("SELECT ...")
+
+async with pool.atransaction() as tx:
+    db = get_async_db(tx.client)
+    await db.insert("users", {...})
+    # auto-commit on success, auto-rollback on exception
+```
+
+### Architecture (Strategy A: threadpool-backed)
+
+- `AsyncDb` (`longjrm/database/async_db.py`) wraps the synchronous `Db`
+  returned by `get_db()`. Each public method dispatches through
+  `asyncio.to_thread`, so the caller's event loop is not blocked while
+  the underlying (still-synchronous) DB-API driver does its I/O.
+- `Pool.aclient()` / `Pool.atransaction()` (`longjrm/connection/pool.py`)
+  reuse the synchronous `client()` / `transaction()` context managers
+  internally — `__enter__` / `__exit__` are dispatched via
+  `asyncio.to_thread`. This is **deliberate**: session_setup, autocommit
+  toggling, isolation levels, and teardown logic all have a single source
+  of truth in the sync path. Any change there is automatically inherited
+  by the async path.
+- Each `AsyncDb` instance holds an `asyncio.Lock` to serialize concurrent
+  calls on the wrapped DB-API connection. Accidentally `gather()`-ing on
+  a single `AsyncDb` is safe (serialized) instead of corrupt; for real
+  concurrency, callers should `async with pool.aclient()` per branch.
+
+### Async development rules (for future maintainers)
+
+- **Never call sync `Db` methods directly inside `async def` code in this
+  repo.** If you need to call a sync helper from inside an async path,
+  wrap it with `await asyncio.to_thread(...)` or move the call into the
+  sync path. Direct calls block the event loop.
+- **Mirror sync method signatures 1:1 in `AsyncDb`.** When a new method
+  is added to `Db` and is appropriate for async use, add a matching
+  `async def` to `AsyncDb` that delegates via `asyncio.to_thread`. Keep
+  parameter names, defaults, and return shape identical. This is what
+  lets users mechanically migrate sync → async by adding `await`.
+- **Don't duplicate session / transaction logic.** `Pool.aclient()` and
+  `Pool.atransaction()` must keep wrapping the sync context managers,
+  not reimplement them. If a feature requires diverging async behavior,
+  surface it on the sync side first.
+- **Phase 1 covers**: `select`, `query`, `execute`, `insert`, `update`,
+  `delete`, `merge`, plus `commit` / `rollback` / `set_autocommit` /
+  `get_autocommit`. **Phase 2** (planned) will add `bulk_update`,
+  `merge_select`, the `stream_*` family (with `AsyncIterator` adapters),
+  and `run_*_from_file` / `execute_script`.
+- **Spark and SQLite + SQLAlchemy are out of scope.** Spark owns its own
+  scheduling; the async test must skip it explicitly. SQLite +
+  SQLAlchemy `SingletonThreadPool` is incompatible with threadpool
+  dispatch — document any new async examples to use the DBUtils backend
+  for SQLite.
 
 ## CRUD Operations API
 
@@ -283,12 +353,16 @@ pip install -e .[all]
 # Run all tests
 python -m unittest discover longjrm/tests *_test.py
 
-# Run specific tests
+# Run specific sync tests
 python longjrm/tests/connection_test.py
 python longjrm/tests/pool_test.py
 python longjrm/tests/select_test.py
 python longjrm/tests/insert_test.py
 python longjrm/tests/spark_test.py
+
+# Run async smoke tests (requires postgres/sqlite reachable; others auto-skip)
+python -m unittest longjrm.tests.async_select_test -v
+TEST_DB=postgres python -m unittest longjrm.tests.async_select_test -v
 ```
 
 ## Configuration
@@ -341,8 +415,9 @@ longjrm/
 │   ├── dsn_parts_helper.py    # DSN parsing utilities
 │   └── pool.py                # Connection pooling implementation
 ├── database/                   # Database operations
-│   ├── __init__.py            # get_db() factory function
-│   ├── db.py                  # Base Db class with CRUD operations
+│   ├── __init__.py            # get_db() and get_async_db() factory functions
+│   ├── db.py                  # Base Db class with CRUD operations (sync)
+│   ├── async_db.py            # AsyncDb wrapper for use inside event loops (0.2.0+)
 │   ├── postgres.py            # PostgreSQL-specific operations
 │   ├── mysql.py               # MySQL/MariaDB-specific operations
 │   ├── sqlite.py              # SQLite-specific operations
@@ -376,7 +451,7 @@ Each database operation requires a "client" object containing:
 
 ## Package Information
 
-- **Version**: 0.1.0
+- **Version**: 0.2.0
 - **Author**: Mike Gong at LONGINFO
 - **Package**: longjrm
 - **Python**: >= 3.10
