@@ -755,6 +755,53 @@ The library follows Python logging best practices:
 ### Connection Pooling
 - SQLAlchemy >= 2.0.0 (Advanced connection pooling backend)
 
+## Release Process
+
+PyPI publishing is wired up via [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
+and triggers **only** when a GitHub Release is *published*. Normal
+`git push` and merges to `main` do **not** publish to PyPI.
+
+### Steps to cut a release (example: `v0.2.0`)
+
+1. **Bump version on a feature branch**:
+   - Update `VERSION` (single line: `0.2.0`)
+   - Update `pyproject.toml` `version = "0.2.0"` — must match `VERSION`
+   - Move `CHANGELOG.md` `[Unreleased]` entries under a new
+     `## [0.2.0] - YYYY-MM-DD` section
+   - Commit and push the branch
+2. **Merge to `main`** via PR.
+3. **Tag the release commit on `main`**:
+   ```bash
+   git checkout main && git pull
+   git tag -a v0.2.0 -m "Release v0.2.0"
+   git push origin v0.2.0
+   ```
+4. **Create the GitHub Release** (this is the step that publishes to PyPI):
+   - GitHub → *Releases* → *Draft a new release*
+   - Choose tag `v0.2.0`
+   - Paste the `CHANGELOG.md` section for `[0.2.0]` as the release notes
+   - Click **Publish release**
+5. **Verify**: the `Publish to PyPI` workflow run should appear under
+   *Actions*. On success, the new version shows up at
+   <https://pypi.org/project/longjrm/>.
+
+### Pre-flight checklist
+
+- [ ] `VERSION` and `pyproject.toml` `version` agree
+- [ ] `CHANGELOG.md` `[Unreleased]` is empty (or contains only items
+      explicitly intended for the *next* release)
+- [ ] All tests pass against at least one real database
+- [ ] No documentation in `README.md` / `CLAUDE.md` still references the
+      previous version number
+
+### Notes
+
+- The workflow uses [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)
+  (`id-token: write`), so there is no API token to rotate.
+- The tag itself does not trigger publishing — only a *published*
+  Release does. You can push a tag, inspect it, and only later create
+  the Release.
+
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
