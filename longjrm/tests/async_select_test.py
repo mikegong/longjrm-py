@@ -21,6 +21,7 @@ Filter by DB:
 import asyncio
 import logging
 import os
+import socket
 import sys
 import time
 import unittest
@@ -68,6 +69,21 @@ def _setup_table(sync_db):
     sync_db.execute(create_sql)
 
 
+def _is_host_reachable(db_cfg, timeout: float = 1.0) -> bool:
+    """Quick TCP probe so we can skip unreachable DBs without waiting for
+    each driver's own multi-second connect timeout. SQLite (no host/port)
+    is always considered reachable."""
+    host = getattr(db_cfg, "host", None)
+    port = getattr(db_cfg, "port", None)
+    if not host or not port:
+        return True
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
 class AsyncDbSmokeTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for AsyncDb + Pool.aclient() / atransaction()."""
 
@@ -85,11 +101,17 @@ class AsyncDbSmokeTests(unittest.IsolatedAsyncioTestCase):
         from longjrm.database import get_db
 
         db_cfg = self.cfg.require(db_key)
-        pool = Pool.from_config(db_cfg, backend)
+        # Pool.from_config can block on driver import / eager pool init (e.g.
+        # ibm_db DLL loading); offload it so the event loop stays responsive.
+        pool = await asyncio.to_thread(Pool.from_config, db_cfg, backend)
         try:
-            # One-time table setup via sync API (fixture concern, not under test)
-            with pool.client() as client:
-                _setup_table(get_db(client))
+            # One-time table setup via sync API (fixture concern, not under
+            # test). Run inside to_thread so the synchronous DB-API calls
+            # don't trip asyncio's slow-callback warning.
+            def _do_setup():
+                with pool.client() as client:
+                    _setup_table(get_db(client))
+            await asyncio.to_thread(_do_setup)
 
             # ---- Test 1: aclient() + insert + select round-trip ----
             async with pool.aclient() as client:
@@ -273,7 +295,7 @@ class AsyncDbSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stream_seen["count"], 4)
 
         finally:
-            pool.dispose()
+            await asyncio.to_thread(pool.dispose)
 
     async def test_async_crud_round_trip(self):
         """Run the smoke sequence against every active (db, backend) pair.
@@ -299,6 +321,15 @@ class AsyncDbSmokeTests(unittest.IsolatedAsyncioTestCase):
                         "SQLite + SQLAlchemy SingletonThreadPool not "
                         "compatible with threadpool dispatch; use DBUtils "
                         "backend for SQLite under async."
+                    )
+
+                # Fast TCP probe: skip in <1s instead of waiting 40–80s for
+                # each driver's own connect timeout when DB2/Oracle/SQL
+                # Server are not running locally.
+                db_cfg = self.cfg.require(db_key)
+                if not await asyncio.to_thread(_is_host_reachable, db_cfg):
+                    self.skipTest(
+                        f"{db_key} host {db_cfg.host}:{db_cfg.port} not reachable"
                     )
 
                 try:

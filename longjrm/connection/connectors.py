@@ -215,6 +215,12 @@ class SqliteConnector(BaseConnector):
         import sqlite3
         db_path = self.database or ':memory:'
         kwargs = self._filter_options(self._PASSTHROUGH)
+        # Default check_same_thread=False: connections live in a pool and are
+        # handed to whatever thread checks them out (especially under
+        # asyncio.to_thread). The pool guarantees exclusive ownership per
+        # checkout, so the safety check would only produce false positives.
+        # Users can still opt back in via options.check_same_thread = true.
+        kwargs.setdefault("check_same_thread", False)
         conn = sqlite3.connect(db_path, **kwargs)
         if self.autocommit:
             conn.isolation_level = None
@@ -232,7 +238,15 @@ class SqliteConnector(BaseConnector):
             else:
                 conn.isolation_level = ''  # Starts transaction mode
         except Exception as e:
-            logger.warning(f"Could not set SQLite isolation_level: {e}")
+            # Cross-thread ProgrammingError is silently downgraded: with
+            # check_same_thread=False (our default) it doesn't happen, but
+            # users who override it should still be able to use the pool —
+            # DBUtils will recycle the unusable connection on the next ping.
+            msg = str(e)
+            if "thread" in msg.lower():
+                logger.debug(f"Skipping SQLite isolation_level set across threads: {e}")
+            else:
+                logger.warning(f"Could not set SQLite isolation_level: {e}")
 
     @staticmethod
     def get_dbapi_autocommit(conn) -> bool:

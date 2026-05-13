@@ -686,6 +686,37 @@ The test suite provides comprehensive coverage of all database operations:
   - Automatic placeholder detection and conversion
   - Cross-database placeholder compatibility
 
+## Project Layout
+
+```
+longjrm/
+├── __init__.py                 # Package init with NullHandler logging
+├── config/                     # Configuration management
+│   ├── config.py               # JrmConfig loader (env + JSON files)
+│   └── runtime.py              # Process-wide active config
+├── connection/                 # Connection & pool management
+│   ├── connectors.py           # Base + per-DB connector classes
+│   ├── driver_map.json         # Authoritative driver registry
+│   ├── driver_registry.py      # Driver loading / threadsafety fixes
+│   ├── dsn_parts_helper.py     # DSN parsing
+│   └── pool.py                 # Pool + sync/async context managers
+├── database/                   # CRUD operations
+│   ├── __init__.py             # get_db() / get_async_db() factories
+│   ├── db.py                   # Base Db (ABC) with sync CRUD
+│   ├── async_db.py             # AsyncDb wrapper (threadpool dispatch)
+│   ├── postgres.py             # Postgres-specific overrides
+│   ├── mysql.py                # MySQL/MariaDB-specific overrides
+│   ├── sqlite.py               # SQLite-specific overrides
+│   ├── oracle.py               # Oracle-specific overrides
+│   ├── db2.py                  # DB2-specific overrides
+│   ├── sqlserver.py            # SQL Server-specific overrides
+│   ├── spark.py                # Spark SQL-specific overrides
+│   ├── generic.py              # Generic DB-API 2.0 fallback
+│   └── placeholder_handler.py  # Placeholder style conversion
+├── tests/                      # Test suite (sync + async)
+└── utils/                      # SQL / data / file helpers
+```
+
 ## Design Patterns
 
 ### JRM Query Pattern
