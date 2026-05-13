@@ -12,19 +12,27 @@ This package provides database connectivity and operations for:
 - Spark SQL (via pyspark)
 
 Submodules:
-- db: Base Db class with SQL database operations
+- db: Base Db class with SQL database operations (synchronous)
+- async_db: AsyncDb wrapper for use inside event loops (FastAPI / aiohttp / Sanic)
 - postgres: PostgresDb class for PostgreSQL
 - mysql: MySQLDb class for MySQL/MariaDB
 - sqlite: SqliteDb class for SQLite
 - spark: SparkDb class for Spark SQL
 - placeholder_handler: SQL placeholder handling utilities
 
-Usage:
+Usage (synchronous):
     from longjrm.database import get_db
-    
+
     # client is a dict with 'conn', 'database_type', 'database_name', 'db_lib'
     db = get_db(client)
     result = db.select('users', ['id', 'name'], {'active': True})
+
+Usage (async; requires Pool.aclient() / Pool.atransaction()):
+    from longjrm.database import get_async_db
+
+    async with pool.aclient() as client:
+        db = get_async_db(client)
+        result = await db.select('users', ['id', 'name'], {'active': True})
 """
 
 from longjrm.database.db import Db
@@ -78,9 +86,39 @@ def get_db(client):
         return GenericDb(client)
 
 
+def get_async_db(client):
+    """
+    Factory function to create an AsyncDb instance for use inside event loops.
+
+    AsyncDb wraps the synchronous Db returned by get_db() and dispatches each
+    method call through asyncio.to_thread, so the event loop is not blocked
+    while the underlying (still-synchronous) DB-API driver does its I/O.
+
+    Args:
+        client: Same dict shape as accepted by get_db(). Typically obtained
+            from ``pool.aclient()`` (the async counterpart of ``pool.client()``).
+
+    Returns:
+        AsyncDb instance whose methods mirror Db's methods 1:1 but return
+        awaitables.
+
+    Notes:
+        - This is threadpool-backed async, not native async I/O. For C10K-class
+          throughput, evaluate a native async driver (asyncpg, etc.) directly.
+        - A single AsyncDb wraps a single DB-API connection; do not share one
+          instance across concurrent gather() branches expecting parallelism.
+          AsyncDb serializes calls internally via asyncio.Lock to keep the
+          underlying connection consistent. For real concurrency, check out
+          one AsyncDb per branch via separate ``async with pool.aclient()``.
+    """
+    from longjrm.database.async_db import AsyncDb
+    return AsyncDb(client)
+
+
 __all__ = [
     'Db',
     'PlaceholderHandler',
     'get_db',
+    'get_async_db',
 ]
 

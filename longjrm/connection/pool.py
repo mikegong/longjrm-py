@@ -1,8 +1,9 @@
 from __future__ import annotations
-from typing import Any, Mapping, Optional, Generator, Dict, Callable, List
+from typing import Any, Mapping, Optional, Generator, AsyncGenerator, Dict, Callable, List
+import asyncio
 import logging
 from enum import Enum
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from longjrm.config.config import DatabaseConfig
 from longjrm.config.runtime import get_config
 from longjrm.connection.connectors import get_connector_class, unwrap_connection as _unwrap_connection
@@ -442,6 +443,79 @@ class Pool:
             return results
 
         return self.execute_transaction(batch_ops, isolation_level)
+
+    # ------------------------------------------------------------------
+    # Async API (threadpool-backed; see longjrm.database.async_db.AsyncDb).
+    #
+    # These methods exist so callers running inside an event loop (FastAPI,
+    # aiohttp, Sanic, etc.) can check out a client without blocking the loop
+    # on connection acquisition / session setup. They reuse the synchronous
+    # ``client()`` / ``transaction()`` context managers internally so behavior
+    # (session_setup / teardown, autocommit handling, isolation levels) stays
+    # consistent across sync and async paths.
+    # ------------------------------------------------------------------
+
+    @asynccontextmanager
+    async def aclient(self, **context) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Async context manager for client checkout/checkin.
+
+        Wraps the synchronous ``client()`` so connection acquisition, session
+        setup, and teardown all run in a worker thread instead of blocking
+        the event loop.
+
+        Usage:
+            async with pool.aclient(user_id=123) as client:
+                from longjrm.database import get_async_db
+                db = get_async_db(client)
+                result = await db.select("users", ["*"])
+        """
+        cm = self.client(**context)
+        client = await asyncio.to_thread(cm.__enter__)
+        try:
+            yield client
+        except BaseException as exc:
+            # Forward the exception to __exit__ so session teardown runs and
+            # the underlying contextmanager can decide whether to suppress.
+            suppressed = await asyncio.to_thread(
+                cm.__exit__, type(exc), exc, exc.__traceback__
+            )
+            if not suppressed:
+                raise
+        else:
+            await asyncio.to_thread(cm.__exit__, None, None, None)
+
+    @asynccontextmanager
+    async def atransaction(
+        self, isolation_level: Optional[str] = None
+    ) -> AsyncGenerator["TransactionContext", None]:
+        """
+        Async context manager for explicit transaction control.
+
+        Wraps the synchronous ``transaction()``: connection acquisition,
+        autocommit toggling, commit/rollback, and pool return all run in a
+        worker thread, leaving the event loop free.
+
+        Usage:
+            async with pool.atransaction() as tx:
+                from longjrm.database import get_async_db
+                db = get_async_db(tx.client)
+                await db.insert("users", {"name": "John"})
+                await db.update("profiles", {"active": True}, {"user_id": 1})
+                # Auto-commit on success, auto-rollback on exception
+        """
+        cm = self.transaction(isolation_level)
+        tx = await asyncio.to_thread(cm.__enter__)
+        try:
+            yield tx
+        except BaseException as exc:
+            suppressed = await asyncio.to_thread(
+                cm.__exit__, type(exc), exc, exc.__traceback__
+            )
+            if not suppressed:
+                raise
+        else:
+            await asyncio.to_thread(cm.__exit__, None, None, None)
 
     def dispose(self) -> None:
         self._b.dispose()
