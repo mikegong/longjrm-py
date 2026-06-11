@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-11
+
 ### Fixed
 
 - **`merge_select` broken on Oracle / SQL Server / Spark**: those backends inherited the base `INSERT ... ON CONFLICT` implementation, which they don't support, so every `merge_select` call returned a `NotImplementedError` failure (only PostgreSQL/MySQL/SQLite and Db2 worked). `merge_select` is now generic across **all** backends — Db2/Oracle/SQL Server/Spark use a shared `MERGE INTO ... USING (SELECT ...)` builder (with per-dialect handling for the `AS` alias keyword, Db2 `ELSE IGNORE`, the SQL Server trailing `;`, and Spark's qualified `SET` targets), while PostgreSQL/MySQL/SQLite keep the `INSERT ... ON CONFLICT / ON DUPLICATE KEY` path. The Db2-specific `merge_select` override is removed in favor of the shared builder.
