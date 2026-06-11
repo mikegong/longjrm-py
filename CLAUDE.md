@@ -99,5 +99,5 @@ overrides like `_construct_select_sql()` if the default isn't portable.
 
 - CRUD / where-condition / placeholder syntax → README + `db.py`.
 - Module tree → `ls`.
-- Dependency list → [pyproject.toml](pyproject.toml) / [requirements.txt](requirements.txt).
+- Dependency list → [pyproject.toml](pyproject.toml) (`dependencies` + `optional-dependencies`).
 - Step-by-step "add a database" tutorial → contribute to README if needed.

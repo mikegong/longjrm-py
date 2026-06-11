@@ -46,4 +46,4 @@ with pool.client() as client:
 ## Summary Checklist
 
 1. [ ] Replace manual `get_client`/`close_client` with `with pool.client():`.\n2. [ ] Replace `Db(client)` with `get_db(client)`.
-3. [ ] Ensure `requirements.txt` includes any specific drivers (e.g., `psycopg` instead of `psycopg2` if migrating driver too).
+3. [ ] Install the driver extras you need from [pyproject.toml](../pyproject.toml) (e.g., `pip install longjrm[postgres]` — `psycopg` instead of `psycopg2` if migrating driver too).
