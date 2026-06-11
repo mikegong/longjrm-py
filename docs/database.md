@@ -281,6 +281,14 @@ All query operations return a standardized response format:
 }
 ```
 
+> **Column key casing — always lowercase.** Result-row dict keys (and the
+> `columns` list) are normalized to lowercase on every backend, regardless of
+> the driver's native identifier folding. DB2 and Oracle report unquoted
+> identifiers in UPPERCASE and PostgreSQL in lowercase, so LongJRM lowercases
+> them to give portable, backend-independent keys. Always read results with
+> lowercase keys (`row["etl_key"]`), never `row["ETL_KEY"]` — the latter
+> returns `None`/`KeyError` even though the table column is uppercase.
+
 ### Database-Specific Query Handling
 
 #### SQL Databases (PostgreSQL, MySQL)

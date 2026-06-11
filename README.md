@@ -226,6 +226,24 @@ Create database configuration files in JSON format:
 }
 ```
 
+#### `jrm.config.json` vs `dbinfos.json`
+
+File-based configuration uses **two files with distinct roles** (both optional — you can use either or both):
+
+| File | Role | Shape |
+|------|------|-------|
+| `jrm.config.json` | Application settings: `default_db` and pool tuning (`jrm_max_conn_pool_size`, `jrm_connect_timeout`, etc.), plus an optional nested `databases` block | Wrapper object; databases live under a `"databases"` key |
+| `dbinfos.json` | A catalog of database connections — nothing else | Flat `{ "db-name": { ...connection... } }` map (the example above) |
+
+How they combine in `JrmConfig.from_files(config_path, dbinfos_path)`:
+
+- **Database definitions are merged**: entries from `dbinfos.json` are applied first, then `jrm.config.json`'s `databases` block — so on a key conflict, **`jrm.config.json` wins**.
+- **`default_db` and pool tuning come only from `jrm.config.json`.** `dbinfos.json` contributes database entries only.
+
+`jrm.config.json` can be used on its own (put your databases under its `databases` key). `dbinfos.json` can supply databases on its own too, but then `default_db` and pool settings fall back to defaults. At least one database must be defined across the files, or loading raises a configuration error.
+
+See [docs/config.md](docs/config.md) for the full configuration reference.
+
 ## Usage
 
 ### Runtime Configuration Usage
