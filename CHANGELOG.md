@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`merge_select` broken on Oracle / SQL Server / Spark**: those backends inherited the base `INSERT ... ON CONFLICT` implementation, which they don't support, so every `merge_select` call returned a `NotImplementedError` failure (only PostgreSQL/MySQL/SQLite and Db2 worked). `merge_select` is now generic across **all** backends — Db2/Oracle/SQL Server/Spark use a shared `MERGE INTO ... USING (SELECT ...)` builder (with per-dialect handling for the `AS` alias keyword, Db2 `ELSE IGNORE`, the SQL Server trailing `;`, and Spark's qualified `SET` targets), while PostgreSQL/MySQL/SQLite keep the `INSERT ... ON CONFLICT / ON DUPLICATE KEY` path. The Db2-specific `merge_select` override is removed in favor of the shared builder.
+- **`merge_select` conditions: operators silently dropped on Db2**: the old Db2 override only understood a flat-equality dict (`{col: val}`) or a raw string; any other shape (e.g. operator/range conditions) fell through and the WHERE clause was **silently omitted**, merging the entire source table. Conditions now route through the shared `where_parser` on every backend.
+- **`merge_select` on SQLite**: `INSERT ... SELECT ... ON CONFLICT` with no `WHERE` raised `near "DO": syntax error` (SQLite parses `ON` as a join clause); a `WHERE 1=1` disambiguator is now added on SQLite when the source SELECT has no filter.
+
+### Changed
+
+- **`merge_select` `order_by` is ignored for the MERGE INTO backends** (Db2/Oracle/SQL Server/Spark): it cannot affect merge semantics and is illegal inside the `USING` subquery on SQL Server. It is still applied for the `INSERT ... SELECT` (PostgreSQL/MySQL/SQLite) family.
+
+### Added
+
+- **`merge_select`: SQL-injection-safe conditions by default**: condition values are now **bound as parameters** by default (`dynamic_param='Y'`, consistent with `select()`), instead of being inlined into the SQL. Pass `dynamic_param='N'` to inline (quoted/escaped); Spark always inlines because its connector can't bind here. New shared helper `longjrm.utils.sql.build_where` returns `(clause, values)`; `build_inline_where` remains as a thin inline wrapper.
+- **`merge_select` conditions: operators and list-of-conditions support**: `conditions` accepts, on every backend, (1) a raw clause string (verbatim), (2) a dict with operator/`IN`/`$and`/`$or` support (e.g. `{"col": {">": x, "<=": y}}`), or (3) a list of condition dicts AND-ed together (e.g. `[{"col": {">": x}}, {"col": {"<=": y}}]`). Backtick-escaped CURRENT keywords are emitted as SQL keywords.
+- **`merge_select`: `isolation_clause` available on all backends** (previously Db2-only), appended to the source SELECT; defaults to empty.
+
 ---
 
 ## [0.2.0] - 2026-05-11

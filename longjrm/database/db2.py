@@ -15,7 +15,11 @@ class Db2Db(Db):
     """
     Db2 database implementation.
     """
-    
+
+    # merge_select(): Db2 uses MERGE INTO ... USING (SELECT ...) with ELSE IGNORE.
+    _merge_select_style = 'merge_into'
+    _merge_select_else_clause = 'ELSE IGNORE'
+
     def __init__(self, client):
         super().__init__(client)
         self.placeholder = '?' # Db2 uses ? as placeholder
@@ -185,52 +189,6 @@ class Db2Db(Db):
                        f"WHEN NOT MATCHED THEN INSERT ({column_str}) VALUES ({insert_str}) ELSE IGNORE"
             
             return self.execute(sql)
-
-    def merge_select(self, source_table, target_table, insert_columns, key_columns, order_by=None,
-                     conditions=None, source_select=None, update_columns=None, isolation_clause=''):
-        """
-        Merge data from source table via select into target table for DB2.
-        """
-        insert_column_str = ','.join(insert_columns)
-        match_str = ''
-        
-        for kc in key_columns:
-            match_str += f" AND A.{kc} = SRC.{kc}"
-        match_str = match_str[5:]
-
-        if not update_columns:
-             update_columns = [c for c in insert_columns if c not in key_columns]
-        
-        update_str = ','.join([f"{k} = SRC.{k}" for k in update_columns])
-        insert_str = ','.join([f"SRC.{k}" for k in insert_columns])
-
-        if source_select:
-             # Using provided select statement
-             unescaped_source = Db.unescape_current_keyword(source_select) if hasattr(Db, 'unescape_current_keyword') else source_select
-             source_sql = unescaped_source
-        else:
-             cond_str = ""
-             if conditions:
-                 if isinstance(conditions, dict):
-                     parts = []
-                     for k, v in conditions.items():
-                         if isinstance(v, str):
-                             parts.append(f"{k}='{v}'")
-                         else:
-                             parts.append(f"{k}={v}")
-                     if parts:
-                         cond_str = " WHERE " + " AND ".join(parts)
-                 elif isinstance(conditions, str):
-                     cond_str = conditions
-             
-             clause = f"ORDER BY {order_by}" if order_by else ""
-             source_sql = f"SELECT {insert_column_str} FROM {source_table} {cond_str} {clause} {isolation_clause}"
-
-        sql = f"MERGE INTO {target_table} AS A USING ({source_sql}) AS SRC ON ({match_str}) " \
-              f"WHEN MATCHED THEN UPDATE SET {update_str} " \
-              f"WHEN NOT MATCHED THEN INSERT ({insert_column_str}) VALUES ({insert_str}) ELSE IGNORE"
-              
-        return self.execute(sql)
 
     def bulk_load(self, table, load_info=None, *, command=None):
         """

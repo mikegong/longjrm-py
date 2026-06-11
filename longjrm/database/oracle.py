@@ -10,7 +10,12 @@ class OracleDb(Db):
     """
     Oracle database implementation.
     """
-    
+
+    # merge_select(): Oracle uses MERGE INTO ... USING (SELECT ...); Oracle does
+    # not accept an AS keyword on the table/source aliases.
+    _merge_select_style = 'merge_into'
+    _merge_select_use_as = False
+
     def __init__(self, client):
         super().__init__(client)
         # Oracle uses :key or :1, :2 placeholders. 

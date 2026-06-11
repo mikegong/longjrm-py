@@ -22,7 +22,14 @@ class SparkDb(Db):
     Transaction methods (commit/rollback) are no-ops as Spark SQL
     doesn't support traditional transactions (use Delta Lake for ACID).
     """
-    
+
+    # merge_select(): Spark/Delta uses MERGE INTO ...; SET targets must be
+    # qualified, and the connector can't bind parameters here so conditions are
+    # always inlined.
+    _merge_select_style = 'merge_into'
+    _merge_select_set_target_prefix = 'target.'
+    _merge_select_supports_bind = False
+
     def __init__(self, client, use_parameterized=None):
         super().__init__(client)
         self.spark = client['conn']  # SparkSession

@@ -10,7 +10,12 @@ class SqlServerDb(Db):
     """
     Microsoft SQL Server database implementation.
     """
-    
+
+    # merge_select(): SQL Server uses MERGE INTO ...; the statement must be
+    # terminated with a semicolon.
+    _merge_select_style = 'merge_into'
+    _merge_select_terminator = ';'
+
     def __init__(self, client):
         super().__init__(client)
         # SQL Server (pyodbc) uses ? as placeholder

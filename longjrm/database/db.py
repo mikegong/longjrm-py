@@ -75,6 +75,52 @@ class Db(ABC):
         ...
 
     # -------------------------------------------------------------------------
+    # merge_select() SQL family
+    # -------------------------------------------------------------------------
+    # Backends that support INSERT ... ON CONFLICT / ON DUPLICATE KEY use the
+    # base 'on_conflict' path. Backends that cannot (Db2, Oracle, SQL Server,
+    # Spark) set _merge_select_style='merge_into' to use the shared
+    # MERGE INTO ... USING (SELECT ...) builder below; the remaining knobs
+    # absorb per-dialect differences.
+    _merge_select_style = 'on_conflict'
+    _merge_select_use_as = True           # 'AS target'/'AS source' vs bare (Oracle)
+    _merge_select_set_target_prefix = ''  # UPDATE SET left side (Spark: 'target.')
+    _merge_select_else_clause = ''        # Db2 appends 'ELSE IGNORE'
+    _merge_select_terminator = ''         # SQL Server requires a trailing ';'
+    _merge_select_supports_bind = True    # Spark can't bind here -> forces inline
+    _upsert_select_needs_where = False    # SQLite needs a WHERE to disambiguate
+                                          # INSERT...SELECT...ON CONFLICT
+
+    def _build_merge_into_select_sql(self, target_table, insert_columns, key_columns,
+                                     update_columns, source_sql):
+        """Build a ``MERGE INTO ... USING (SELECT ...)`` statement.
+
+        Shared by the 'merge_into' backends (Db2/Oracle/SQL Server/Spark);
+        per-dialect differences are captured by the ``_merge_select_*`` class
+        attributes. ``source_sql`` is the fully built source SELECT (already
+        carrying any WHERE / ORDER BY / isolation clause).
+        """
+        insert_column_str = ', '.join(insert_columns)
+        as_kw = 'AS ' if self._merge_select_use_as else ''
+        match_str = ' AND '.join(f"target.{k} = source.{k}" for k in key_columns)
+        insert_values_str = ', '.join(f"source.{c}" for c in insert_columns)
+
+        sql = (f"MERGE INTO {target_table} {as_kw}target "
+               f"USING ({source_sql}) {as_kw}source "
+               f"ON ({match_str})")
+        if update_columns:
+            prefix = self._merge_select_set_target_prefix
+            update_str = ', '.join(f"{prefix}{c} = source.{c}" for c in update_columns)
+            sql += f" WHEN MATCHED THEN UPDATE SET {update_str}"
+        sql += (f" WHEN NOT MATCHED THEN INSERT ({insert_column_str}) "
+                f"VALUES ({insert_values_str})")
+        if self._merge_select_else_clause:
+            sql += f" {self._merge_select_else_clause}"
+        if self._merge_select_terminator:
+            sql += self._merge_select_terminator
+        return sql
+
+    # -------------------------------------------------------------------------
     # Transaction control - uses connector methods for driver-specific handling
     # -------------------------------------------------------------------------
     
@@ -1049,7 +1095,8 @@ class Db(ABC):
         return sql, values
 
     def merge_select(self, source_table, target_table, insert_columns, key_columns,
-                     order_by=None, conditions=None, source_select=None, update_columns=None):
+                     order_by=None, conditions=None, source_select=None, update_columns=None,
+                     isolation_clause='', dynamic_param='Y'):
         """
         Merge data from source table via SELECT into target table.
         
@@ -1061,52 +1108,92 @@ class Db(ABC):
             target_table: Name of the target table to merge into
             insert_columns: List of column names to insert/update
             key_columns: List of column names that define uniqueness for matching records
-            order_by: Optional ORDER BY clause for the source query (e.g., "id DESC")
-            conditions: Optional WHERE conditions dict for filtering source data
+            order_by: Optional ORDER BY clause for the source query (e.g., "id DESC").
+                Ignored for the MERGE INTO backends (Db2/Oracle/SQL Server/Spark),
+                where it can't affect merge semantics and is illegal in the USING
+                subquery on SQL Server.
+            conditions: Optional filter for the source data. Accepts a raw clause
+                string (used verbatim), a dict (supports operators / IN / $and /
+                $or, e.g. {"col": {">": x, "<=": y}}), or a list of condition dicts
+                AND-ed together (e.g. [{"col": {">": x}}, {"col": {"<=": y}}]). See
+                longjrm.utils.sql.build_where.
             source_select: Optional custom SELECT statement to use instead of auto-generated one
             update_columns: Optional list of columns to update (defaults to insert_columns minus key_columns)
-            
+            isolation_clause: Optional trailing isolation clause appended to the
+                source SELECT (e.g. Db2 "WITH UR"). Empty for most backends.
+            dynamic_param: 'Y' (default) binds condition values as parameters to
+                avoid SQL injection; 'N' inlines them (quoted/escaped) instead.
+                Backends that cannot bind in this context (Spark) always inline.
+
         Returns:
             Dictionary with:
                 - status: 0 for success, -1 for failure
                 - message: Descriptive message about the operation result
-                - total: Number of rows affected (if available)
+                - count / total / merge_count: Number of rows affected (if available)
+
+        Works across all backends: PostgreSQL/MySQL/SQLite use INSERT ... ON
+        CONFLICT / ON DUPLICATE KEY; Db2/Oracle/SQL Server/Spark use
+        MERGE INTO ... USING (SELECT ...).
         """
         try:
             insert_column_str = ', '.join(insert_columns)
-            
+
             # Determine update columns (default: insert_columns minus key_columns)
             if not update_columns:
                 update_columns = [col for col in insert_columns if col not in key_columns]
-            
-            # Build the source SELECT query
+
+            # Conditions are parameterized by default (dynamic_param='Y') so
+            # untrusted filter values are bound rather than inlined. Backends that
+            # cannot bind here (Spark) force inline; pass dynamic_param='N' to
+            # inline explicitly on any backend.
+            inline = (dynamic_param == 'N') or (not self._merge_select_supports_bind)
+
+            cond_values = []
             if source_select:
                 source_sql = source_select
             else:
-                where_clause = sql_utils.conditions_to_string(conditions) if conditions else ""
-                order_clause = f" ORDER BY {order_by}" if order_by else ""
-                source_sql = f"SELECT {insert_column_str} FROM {source_table}{where_clause}{order_clause}"
-            
-            # Get database-specific upsert clause from subclass
-            upsert_clause = self._build_upsert_clause(key_columns, update_columns, for_values=False)
-            
-            sql = f"""INSERT INTO {target_table} ({insert_column_str})
-                    {source_sql}
-                    {upsert_clause}
-                    """
-            
+                where_clause, cond_values = sql_utils.build_where(
+                    conditions, self.placeholder, inline=inline)
+                # SQLite can't parse INSERT ... SELECT ... ON CONFLICT when the
+                # SELECT has no WHERE (it reads 'ON' as a join clause); a dummy
+                # predicate disambiguates it.
+                if self._upsert_select_needs_where and not where_clause:
+                    where_clause = " WHERE 1=1"
+                # ORDER BY can't affect MERGE semantics and is illegal inside the
+                # USING subquery on SQL Server, so it's only emitted for the
+                # INSERT ... SELECT (on_conflict) family.
+                if order_by and self._merge_select_style != 'merge_into':
+                    order_clause = f" ORDER BY {order_by}"
+                else:
+                    order_clause = ""
+                iso_clause = f" {isolation_clause}" if isolation_clause else ""
+                source_sql = (f"SELECT {insert_column_str} FROM {source_table}"
+                              f"{where_clause}{order_clause}{iso_clause}")
+
+            # Two SQL families: MERGE INTO ... USING (SELECT ...) for backends that
+            # can't do INSERT ... ON CONFLICT / ON DUPLICATE KEY, and the
+            # INSERT ... <upsert clause> form for those that can.
+            if self._merge_select_style == 'merge_into':
+                sql = self._build_merge_into_select_sql(
+                    target_table, insert_columns, key_columns, update_columns, source_sql)
+            else:
+                upsert_clause = self._build_upsert_clause(key_columns, update_columns, for_values=False)
+                sql = f"INSERT INTO {target_table} ({insert_column_str}) {source_sql} {upsert_clause}"
+
             logger.debug(f"Merge Select SQL: {sql}")
-            
-            cur = self.get_cursor()
-            cur.execute(sql)
-            affected_rows = cur.rowcount
-            self.commit()
-            cur.close()
-            
-            message = f"MERGE into table {target_table} succeeded. {affected_rows} rows affected."
-            logger.info(message)
-            return {"status": 0, "message": message, "total": affected_rows}
-            
+
+            # Route through execute() for consistent placeholder conversion,
+            # CURRENT-keyword injection, escaping, binding, and result shape.
+            result = self.execute(sql, cond_values or None)
+            if result.get('status') == 0:
+                affected_rows = result.get('count')
+                result['message'] = (f"MERGE into table {target_table} succeeded. "
+                                     f"{affected_rows} rows affected.")
+                # Back-compat aliases (base previously returned 'total').
+                result['total'] = affected_rows
+                result['merge_count'] = affected_rows
+            return result
+
         except Exception as e:
             message = f'Failed to execute merge_select statement: {e}'
             logger.error(message)

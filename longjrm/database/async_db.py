@@ -192,6 +192,8 @@ class AsyncDb:
         conditions=None,
         source_select=None,
         update_columns=None,
+        isolation_clause='',
+        dynamic_param='Y',
     ):
         async with self._lock:
             return await asyncio.to_thread(
@@ -204,6 +206,8 @@ class AsyncDb:
                 conditions,
                 source_select,
                 update_columns,
+                isolation_clause,
+                dynamic_param,
             )
 
     async def bulk_load(self, table, load_info=None, *, command=None):

@@ -132,6 +132,58 @@ def conditions_to_string(conditions):
     return " WHERE " + " AND ".join(where_parts)
 
 
+def build_where(conditions, placeholder="?", inline=False):
+    """
+    Build a WHERE clause from flexible conditions, returning (clause, values).
+
+    Shared entry point for callers -- such as merge_select() -- that need a
+    filter expressed the same way as select()/query(). Accepts several shapes:
+
+      - None / empty            -> ("", []) (no filtering)
+      - str                     -> (str, []) returned verbatim (assumed to already
+                                   begin with WHERE); lets callers pass a hand-built
+                                   clause for full control / backward compatibility
+      - dict                    -> standard longjrm where mapping; supports
+                                   operator conditions ({col: {">": x, "<=": y}}),
+                                   IN lists, and logical $and/$or/$not operators
+      - list of condition dicts -> implicitly AND-ed together, e.g.
+                                   [{col: {">": x}}, {col: {"<=": y}}]
+
+    When ``inline`` is False (default), value-bearing conditions emit placeholders
+    and their bound values are returned in the second element, so the caller can
+    pass them to execute()/query() and avoid inlining untrusted values. When
+    ``inline`` is True, values are inlined (quoted/escaped) and the returned list
+    is empty. Backtick-escaped CURRENT keywords are always emitted as SQL keywords
+    (never bound). Returns the clause with a leading space and an uppercase WHERE.
+    """
+    if not conditions:
+        return "", []
+    # A pre-built clause string is used as-is (caller owns quoting/escaping).
+    if isinstance(conditions, str):
+        return conditions, []
+    # A bare list of condition dicts is treated as an implicit AND so callers can
+    # express repeated-column ranges (col > a AND col <= b) without colliding on
+    # a single dict key.
+    where = {"$and": conditions} if isinstance(conditions, list) else conditions
+    clause, values = where_parser(where, placeholder, inline=inline)
+    if not clause:
+        return "", []
+    # where_parser emits a lowercase ' where ' prefix; normalize the keyword.
+    return clause.replace(" where ", " WHERE ", 1), (values or [])
+
+
+def build_inline_where(conditions):
+    """
+    Build an inline (no bind parameters) WHERE clause from flexible conditions.
+
+    Thin wrapper around build_where(inline=True) for callers that inline the
+    filter directly into a SQL string. Accepts the same str/dict/list shapes;
+    returns just the clause (a leading-space, uppercase ``WHERE ...``), or "".
+    """
+    clause, _ = build_where(conditions, "?", inline=True)
+    return clause
+
+
 # =============================================================================
 # WHERE Clause Parser Functions
 # =============================================================================

@@ -18,7 +18,11 @@ class SqliteDb(Db):
     - get_stream_cursor(): Same as get_cursor (SQLite doesn't have server-side cursors)
     - _build_upsert_clause(): Uses SQLite's ON CONFLICT syntax (similar to PostgreSQL)
     """
-    
+
+    # SQLite needs a WHERE clause to disambiguate INSERT ... SELECT ... ON CONFLICT
+    # (otherwise 'ON' is parsed as a join clause of the SELECT).
+    _upsert_select_needs_where = True
+
     def __init__(self, client):
         """Initialize SQLite database connection."""
         super().__init__(client)
