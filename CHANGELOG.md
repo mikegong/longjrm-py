@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Consistent error contract: data methods now raise on failure instead of returning `{"status": -1}`** (BREAKING). Methods that previously caught operational errors and returned a `{"status": -1, "message": ...}` dict now log and re-raise. The single contract is now: **success → result dict with `status: 0`; operational failure → raise the driver exception; misuse (bad arguments) → raise `ValueError`/`TypeError`.** This spans:
+  - **Base methods**: `insert`, `bulk_update`, `merge_select`, `execute_script`, `run_script_from_file` (joining `query`/`execute`/`select`/`update`/`delete`/`merge`, which already raised).
+  - **Backend overrides** (these were missed initially and swallowed independently of the base): `sqlite.query`; `spark.query`/`execute`/`_single_insert`/`_bulk_insert`/`update`/`delete`/`merge`/`bulk_load`; `oracle._bulk_insert`/`merge`; `db2.merge` and the `except` paths of `load_admin_cmd`/`export_admin_cmd`/`admin_cmd`; `mysql.bulk_load`; `postgres.bulk_load`; `sqlserver.merge`.
+
+  This fixes a latent atomicity bug — inside `pool.transaction()`, a swallowed error let the context manager commit partial work instead of rolling back (rollback only fires when an exception propagates). **Preserved as result statuses (not raises):** DB2 `ADMIN_CMD` LOAD/EXPORT outcomes (`ROWS_LOADED`/`ROWS_REJECTED`/`ROWS_DELETED` reporting), Spark's `_check_delta_support()` capability guards, and the **streaming** methods (`stream_*`, `stream_to_csv`) with their per-row / aggregate `status` + `max_error_count` / `abort_on_error` semantics. Applications that need to continue past an error should wrap the call (see docs/database.md → "The Error Contract"). Callers that checked `result['status'] == -1` must switch to `try/except`.
+- **`bulk_update` misuse now raises `ValueError`** (BREAKING, minor): passing rows whose data is missing the declared `key_columns` previously returned `{"status": -1}`; it now raises `ValueError`, consistent with how `merge`/`select` already report invalid arguments. (Operational DB errors raise the driver exception; argument/misuse errors raise `ValueError`/`TypeError`.)
+
 ## [0.3.0] - 2026-06-11
 
 ### Fixed

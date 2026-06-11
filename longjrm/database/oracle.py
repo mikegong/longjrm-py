@@ -64,13 +64,9 @@ class OracleDb(Db):
         
         sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm})"
 
-        # Validate consistency to fail fast and match expected behavior
-        # (This avoids driver errors when binding mismatched values)
-        keys_set = set(columns)
-        for i, row in enumerate(data_list):
-            if set(row.keys()) != keys_set:
-                raise ValueError(f"Inconsistent columns at row {i}")
-
+        # Columns come from the first row; rows are bound positionally. No
+        # per-row consistency pre-scan -- the driver raises on a mismatched bind
+        # (see Db._bulk_insert).
         total_affected = 0
         cur = None
         try:
@@ -87,9 +83,8 @@ class OracleDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_affected}
             
         except Exception as e:
-            message = f'Failed to execute bulk insert: {e}'
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message}
+            logger.error(f'Failed to execute bulk insert: {e}', exc_info=True)
+            raise
 
         finally:
             if cur:
@@ -276,9 +271,8 @@ class OracleDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_affected}
             
         except Exception as e:
-            message = f"Failed to merge Oracle: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to merge Oracle: {e}", exc_info=True)
+            raise
         finally:
             if cur:
                 cur.close()

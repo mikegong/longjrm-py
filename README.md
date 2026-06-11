@@ -859,4 +859,16 @@ Developed by Mike Gong at LONGINFO.
 
 ## Documentation
 
+- [docs/database.md](docs/database.md) — full CRUD / select / streaming guide,
+  and **[The Error Contract](docs/database.md#the-error-contract)** (when methods
+  return a result dict vs. raise, the transaction interaction, and the streaming
+  exception).
+- [docs/transaction-management.md](docs/transaction-management.md) — transactions and isolation.
+- [docs/config.md](docs/config.md) — configuration and pooling.
+- [docs/spark.md](docs/spark.md) — Spark backend notes.
+
+**Error handling in one line:** operations return a result dict on success
+(`status: 0`) and **raise** on failure — wrap calls only where your application
+must continue past an error. See the error contract above for the full rules.
+
 All the documentation was compiled with assistance from Gemini 3 Pro, Claude Opus 4.5, and Claude Sonnet 4.

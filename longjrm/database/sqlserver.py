@@ -39,20 +39,6 @@ class SqlServerDb(Db):
         """Get a cursor optimized for streaming."""
         return self.conn.cursor()
 
-    def _bulk_insert(self, table, data_list, return_columns=None, bulk_size=1000):
-        """
-        SQL Server specific bulk insert with validation.
-        """
-        if data_list:
-            # Validate column consistency
-            first_row = data_list[0]
-            keys_set = set(first_row.keys())
-            for i, row in enumerate(data_list):
-                if set(row.keys()) != keys_set:
-                    raise ValueError(f"Inconsistent columns at row {i}")
-                    
-        return super()._bulk_insert(table, data_list, return_columns, bulk_size)
-
     def supports_returning(self):
         """
         SQL Server supports returning generated keys via OUTPUT clause.
@@ -200,9 +186,8 @@ class SqlServerDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_affected}
 
         except Exception as e:
-            message = f"Failed to merge SQL Server: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to merge SQL Server: {e}", exc_info=True)
+            raise
         finally:
             if cur:
                 cur.close()

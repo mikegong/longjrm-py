@@ -81,7 +81,7 @@ result = db.query(sql, arr_values=None)
 **Returns:**
 ```python
 {
-    "status": 0,           # 0 = success, -1 = error
+    "status": 0,           # 0 = success (operations raise on failure)
     "message": "...",      # Status message
     "data": [...],         # List of row dictionaries
     "columns": [...],      # List of column names
@@ -504,6 +504,13 @@ with using_db("analytics"):
 
 ## Exceptions
 
+Data operations follow a raise-on-failure contract: on success they return a
+result dict (`status: 0`); on an **operational** failure they raise the
+underlying driver exception, and on **misuse** (bad arguments) they raise
+`ValueError`/`TypeError`. Streaming methods are the exception (per-row /
+aggregate `status`). Full rules: [database.md → The Error Contract](database.md#the-error-contract).
+The named exceptions below cover connection and configuration setup.
+
 ### JrmConnectionError
 
 Raised when database connection fails.
@@ -536,14 +543,19 @@ except JrmConfigurationError as e:
 
 ## Response Format
 
-All database operations return a standardized response:
+On **success**, database operations return a standardized response:
 
 ```python
 {
-    "status": 0,           # 0 = success, -1 = error
+    "status": 0,           # 0 = success
     "message": "...",      # Human-readable status message
     "data": [...],         # Result data (list of dicts for queries)
     "columns": [...],      # Column names (queries only)
     "count": 10            # Row count (returned or affected)
 }
 ```
+
+On **failure** they raise rather than returning `status: -1` (operational
+errors raise the driver exception; misuse raises `ValueError`/`TypeError`).
+Streaming methods are the exception — they report per-row / aggregate `status`.
+See [database.md → The Error Contract](database.md#the-error-contract).

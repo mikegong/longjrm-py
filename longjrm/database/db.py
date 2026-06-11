@@ -265,10 +265,18 @@ class Db(ABC):
     def query(self, sql, arr_values=None):
         """
         Execute query with small result set, return entire result set.
-        
+
+        Base SQL primitive: returns the result dict on success and raises on
+        failure (does not return a ``status: -1`` dict). See the error
+        contract in docs/database.md.
+
         Args:
             sql: SQL statement to execute
             arr_values: values to bind to query (supports positional and named placeholders)
+        Returns:
+            On success, dict with status (0), message, data, columns, count.
+        Raises:
+            Exception: the underlying driver error if the query fails.
         """
         logger.debug(f"Execute SQL: {sql}")
         logger.debug(f"Execute values: {arr_values}")
@@ -575,7 +583,9 @@ class Db(ABC):
             return_columns: optional list of columns to return from inserted records
             bulk_size: number of records per batch for bulk inserts (default 1000)
         Returns:
-            dictionary with status, message, data (empty), and count (affected rows)
+            On success, dict with status (0), message, data (empty), and count (affected rows).
+        Raises:
+            Exception: the underlying driver error if the insert fails.
         """
         if return_columns is None:
             return_columns = []
@@ -605,10 +615,15 @@ class Db(ABC):
             return {"status": 0, "message": "No data to insert", "data": [], "count": 0}
 
         row_count = len(data_list)
-        
-        # Validate uniform columns based on first record
-        first_row = data_list[0]
-        columns = list(first_row.keys())
+
+        # The INSERT columns + placeholders are taken from the first row; the
+        # remaining rows are bound positionally by executemany. We don't pre-scan
+        # every row for column consistency -- a row with a different column count
+        # makes the driver raise on bind anyway (propagated per the error
+        # contract), so the extra O(rows) pass isn't worth it. Callers are
+        # expected to pass uniformly-shaped rows: a row with the same count but
+        # different/reordered keys would bind to the wrong columns without error.
+        columns = list(data_list[0].keys())
         str_col = ', '.join(columns)
         placeholders = [self.placeholder for _ in columns]
         str_qm = ', '.join(placeholders)
@@ -636,14 +651,10 @@ class Db(ABC):
             message = f"BULK INSERT succeeded. {total_affected} rows affected."
             logger.info(message)
             return {"status": 0, "message": message, "data": [], "count": total_affected}
-            
-        except Exception as e:
-            message = f'Failed to execute bulk insert: {e}'
-            logger.error(message)
-            logger.error(traceback.format_exc())
-            return {"status": -1, "message": message}
 
         finally:
+            # try/finally only — close the cursor; let any error propagate
+            # (raise-on-failure contract), as execute()/query() do.
             if cur:
                 cur.close()
 
@@ -708,11 +719,18 @@ class Db(ABC):
     def execute(self, sql, arr_values=None):
         """
         Execute query with no return result set such as update, delete, and DDLs like create table, etc.
+
+        Base SQL primitive: returns the result dict on success and raises on
+        failure (does not return a ``status: -1`` dict). See the error
+        contract in docs/database.md.
+
         Args:
             sql: SQL statement to execute
             arr_values: values that need to be bound to query (supports both positional and named placeholders)
         Returns:
-            dictionary with status, message, data (empty), and count (affected rows)
+            On success, dict with status (0), message, data (empty), and count (affected rows).
+        Raises:
+            Exception: the underlying driver error if the statement fails.
         """
             
         logger.debug(f"Execute SQL: {sql}")
@@ -786,7 +804,9 @@ class Db(ABC):
             bulk_size: Number of records to process in each batch (default 1000)
             
         Returns:
-            Dictionary with status, message, and total affected rows count.
+            On success, dict with status (0), message, and total affected rows count.
+        Raises:
+            Exception: the underlying driver error if the bulk update fails.
         """
         if not data_list:
             return {"status": 0, "message": "No data to update", "count": 0}
@@ -794,10 +814,10 @@ class Db(ABC):
         row_count = len(data_list)
         first_row = data_list[0]
         
-        # Validate keys exist in data
+        # Validate keys exist in data (misuse -> raise, consistent with merge())
         missing_keys = [k for k in key_columns if k not in first_row]
         if missing_keys:
-            return {"status": -1, "message": f"Key columns {missing_keys} missing from data"}
+            raise ValueError(f"Key columns {missing_keys} missing from data")
             
         # Determine update columns (all keys in data that are not key_columns)
         update_columns = [k for k in first_row.keys() if k not in key_columns]
@@ -860,12 +880,8 @@ class Db(ABC):
             logger.info(message)
             return {"status": 0, "message": message, "count": total_affected}
 
-        except Exception as e:
-            message = f'Failed to execute bulk update: {e}'
-            logger.error(message)
-            logger.error(traceback.format_exc())
-            return {"status": -1, "message": message}
         finally:
+            # try/finally only — close the cursor; let any error propagate.
             if cur:
                 cur.close()
 
@@ -1040,12 +1056,9 @@ class Db(ABC):
                 "data": [],
                 "count": total_affected
             }
-            
-        except Exception as e:
-            logger.error(f"_bulk_merge failed: {e}")
-            raise
-            
+
         finally:
+            # try/finally only — close the cursor; let any error propagate.
             if cur:
                 cur.close()
 
@@ -1126,79 +1139,75 @@ class Db(ABC):
                 Backends that cannot bind in this context (Spark) always inline.
 
         Returns:
-            Dictionary with:
-                - status: 0 for success, -1 for failure
+            On success, a dict with:
+                - status: 0
                 - message: Descriptive message about the operation result
                 - count / total / merge_count: Number of rows affected (if available)
+        Raises:
+            Exception: the underlying driver error if the merge fails.
 
         Works across all backends: PostgreSQL/MySQL/SQLite use INSERT ... ON
         CONFLICT / ON DUPLICATE KEY; Db2/Oracle/SQL Server/Spark use
         MERGE INTO ... USING (SELECT ...).
         """
-        try:
-            insert_column_str = ', '.join(insert_columns)
+        insert_column_str = ', '.join(insert_columns)
 
-            # Determine update columns (default: insert_columns minus key_columns)
-            if not update_columns:
-                update_columns = [col for col in insert_columns if col not in key_columns]
+        # Determine update columns (default: insert_columns minus key_columns)
+        if not update_columns:
+            update_columns = [col for col in insert_columns if col not in key_columns]
 
-            # Conditions are parameterized by default (dynamic_param='Y') so
-            # untrusted filter values are bound rather than inlined. Backends that
-            # cannot bind here (Spark) force inline; pass dynamic_param='N' to
-            # inline explicitly on any backend.
-            inline = (dynamic_param == 'N') or (not self._merge_select_supports_bind)
+        # Conditions are parameterized by default (dynamic_param='Y') so
+        # untrusted filter values are bound rather than inlined. Backends that
+        # cannot bind here (Spark) force inline; pass dynamic_param='N' to
+        # inline explicitly on any backend.
+        inline = (dynamic_param == 'N') or (not self._merge_select_supports_bind)
 
-            cond_values = []
-            if source_select:
-                source_sql = source_select
+        cond_values = []
+        if source_select:
+            source_sql = source_select
+        else:
+            where_clause, cond_values = sql_utils.build_where(
+                conditions, self.placeholder, inline=inline)
+            # SQLite can't parse INSERT ... SELECT ... ON CONFLICT when the
+            # SELECT has no WHERE (it reads 'ON' as a join clause); a dummy
+            # predicate disambiguates it.
+            if self._upsert_select_needs_where and not where_clause:
+                where_clause = " WHERE 1=1"
+            # ORDER BY can't affect MERGE semantics and is illegal inside the
+            # USING subquery on SQL Server, so it's only emitted for the
+            # INSERT ... SELECT (on_conflict) family.
+            if order_by and self._merge_select_style != 'merge_into':
+                order_clause = f" ORDER BY {order_by}"
             else:
-                where_clause, cond_values = sql_utils.build_where(
-                    conditions, self.placeholder, inline=inline)
-                # SQLite can't parse INSERT ... SELECT ... ON CONFLICT when the
-                # SELECT has no WHERE (it reads 'ON' as a join clause); a dummy
-                # predicate disambiguates it.
-                if self._upsert_select_needs_where and not where_clause:
-                    where_clause = " WHERE 1=1"
-                # ORDER BY can't affect MERGE semantics and is illegal inside the
-                # USING subquery on SQL Server, so it's only emitted for the
-                # INSERT ... SELECT (on_conflict) family.
-                if order_by and self._merge_select_style != 'merge_into':
-                    order_clause = f" ORDER BY {order_by}"
-                else:
-                    order_clause = ""
-                iso_clause = f" {isolation_clause}" if isolation_clause else ""
-                source_sql = (f"SELECT {insert_column_str} FROM {source_table}"
-                              f"{where_clause}{order_clause}{iso_clause}")
+                order_clause = ""
+            iso_clause = f" {isolation_clause}" if isolation_clause else ""
+            source_sql = (f"SELECT {insert_column_str} FROM {source_table}"
+                          f"{where_clause}{order_clause}{iso_clause}")
 
-            # Two SQL families: MERGE INTO ... USING (SELECT ...) for backends that
-            # can't do INSERT ... ON CONFLICT / ON DUPLICATE KEY, and the
-            # INSERT ... <upsert clause> form for those that can.
-            if self._merge_select_style == 'merge_into':
-                sql = self._build_merge_into_select_sql(
-                    target_table, insert_columns, key_columns, update_columns, source_sql)
-            else:
-                upsert_clause = self._build_upsert_clause(key_columns, update_columns, for_values=False)
-                sql = f"INSERT INTO {target_table} ({insert_column_str}) {source_sql} {upsert_clause}"
+        # Two SQL families: MERGE INTO ... USING (SELECT ...) for backends that
+        # can't do INSERT ... ON CONFLICT / ON DUPLICATE KEY, and the
+        # INSERT ... <upsert clause> form for those that can.
+        if self._merge_select_style == 'merge_into':
+            sql = self._build_merge_into_select_sql(
+                target_table, insert_columns, key_columns, update_columns, source_sql)
+        else:
+            upsert_clause = self._build_upsert_clause(key_columns, update_columns, for_values=False)
+            sql = f"INSERT INTO {target_table} ({insert_column_str}) {source_sql} {upsert_clause}"
 
-            logger.debug(f"Merge Select SQL: {sql}")
+        logger.debug(f"Merge Select SQL: {sql}")
 
-            # Route through execute() for consistent placeholder conversion,
-            # CURRENT-keyword injection, escaping, binding, and result shape.
-            result = self.execute(sql, cond_values or None)
-            if result.get('status') == 0:
-                affected_rows = result.get('count')
-                result['message'] = (f"MERGE into table {target_table} succeeded. "
-                                     f"{affected_rows} rows affected.")
-                # Back-compat aliases (base previously returned 'total').
-                result['total'] = affected_rows
-                result['merge_count'] = affected_rows
-            return result
-
-        except Exception as e:
-            message = f'Failed to execute merge_select statement: {e}'
-            logger.error(message)
-            logger.error(traceback.format_exc())
-            return {"status": -1, "message": message}
+        # Route through execute() for consistent placeholder conversion,
+        # CURRENT-keyword injection, escaping, binding, and result shape.
+        # execute() raises on failure (error contract), so no local try/except.
+        result = self.execute(sql, cond_values or None)
+        if result.get('status') == 0:
+            affected_rows = result.get('count')
+            result['message'] = (f"MERGE into table {target_table} succeeded. "
+                                 f"{affected_rows} rows affected.")
+            # Back-compat aliases (base previously returned 'total').
+            result['total'] = affected_rows
+            result['merge_count'] = affected_rows
+        return result
 
     def run_query_from_file(self, sql_file, values=None):
         """
@@ -1232,9 +1241,12 @@ class Db(ABC):
         Args:
             sql_script: String containing SQL statements separated by ;
             transaction: If True, wraps execution in a transaction (autocommit=False)
-            
+
         Returns:
-            Dictionary with status and message.
+            On success, a dict with status (0) and message.
+        Raises:
+            Exception: the underlying driver error if a statement fails. When
+                transaction=True the transaction is rolled back before raising.
         """
         if not sql_script:
             return {"status": 0, "message": "SQL script is empty"}
@@ -1254,22 +1266,10 @@ class Db(ABC):
                 self.set_autocommit(False)
             
             for sql in sqls:
-                # Reuse existing unescape logic if present in _prepare_sql, 
-                # but legacy checked unescape_current_keyword explicitly.
-                # Our self.execute() handles inject_current calls via _prepare_sql.
-                
-                # We can call self.execute() directly.
-                # Note: execute() returns a dict result.
-                
-                result = self.execute(sql)
-                if result['status'] != 0:
-                    # If any statement fails, we stop and rollback if in transaction
-                    if transaction:
-                        self.rollback()
-                    return {
-                        "status": -1, 
-                        "message": f"Script execution failed at statement {success_count + 1}: {result['message']}"
-                    }
+                # execute() handles inject_current via _prepare_sql and raises on
+                # failure; a failing statement propagates to the except below,
+                # which rolls back (when transactional) before re-raising.
+                self.execute(sql)
                 success_count += 1
             
             if transaction:
@@ -1285,8 +1285,8 @@ class Db(ABC):
             logger.error(traceback.format_exc())
             if transaction:
                 self.rollback()
-            return {"status": -1, "message": f"Script execution error: {e}"}
-            
+            raise
+
         finally:
             if transaction:
                 self.set_autocommit(autocommit_was_enabled)
@@ -1298,17 +1298,16 @@ class Db(ABC):
         Args:
             sql_file: Path to the SQL file
             transaction: If True, wraps execution in a transaction
-            
+
         Returns:
-            Dictionary with status and message
+            On success, a dict with status (0) and message.
+        Raises:
+            Exception: a file-read error, or the underlying driver error if a
+                statement fails.
         """
-        try:
-            with open(sql_file, 'r', encoding='utf-8') as f:
-                sql_script = f.read()
-            return self.execute_script(sql_script, transaction=transaction)
-        except Exception as e:
-            logger.error(f"Failed to read script file {sql_file}: {e}")
-            return {"status": -1, "message": f"Failed to read script file: {e}"}
+        with open(sql_file, 'r', encoding='utf-8') as f:
+            sql_script = f.read()
+        return self.execute_script(sql_script, transaction=transaction)
 
     def stream_to_csv(self, sql, csv_file, values=None, options=None):
         """

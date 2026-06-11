@@ -193,10 +193,9 @@ class MySQLDb(Db):
                 raise ValueError(f"Unknown source_type: {source_type}")
                 
         except Exception as e:
-            message = f"Failed to bulk load into {table}: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
-            
+            logger.error(f"Failed to bulk load into {table}: {e}", exc_info=True)
+            raise
+
         finally:
             if cur:
                 cur.close()

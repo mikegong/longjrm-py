@@ -126,10 +126,9 @@ class Db2Db(Db):
                     "count": total_affected
                 }
             except Exception as e:
-                message = f'Failed to execute bulk merge: {e}'
-                logger.error(message)
+                logger.error(f'Failed to execute bulk merge: {e}')
                 logger.error(traceback.format_exc())
-                return {"status": -1, "message": message}
+                raise
             finally:
                 if cur:
                     cur.close()
@@ -331,9 +330,8 @@ class Db2Db(Db):
                 logger.error(message)
                 return {"status": -1, "message": message}
         except Exception as e:
-            message = f"Failed to execute ADMIN_CMD stored procedure: {load_cmd}. {e}"
-            logger.error(message)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to execute ADMIN_CMD stored procedure: {load_cmd}. {e}")
+            raise
 
     def export_admin_cmd(self, export_info={}, export_cmd=''):
         """Execute export via ADMIN_CMD stored procedure"""
@@ -397,9 +395,8 @@ class Db2Db(Db):
                 logger.error(message)
                 return {"status": -1, "message": message}
         except Exception as e:
-            message = f"Failed to execute ADMIN_CMD stored procedure: {export_cmd}. {e}"
-            logger.error(message)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to execute ADMIN_CMD stored procedure: {export_cmd}. {e}")
+            raise
 
     def admin_cmd(self, params):
         """Generic method to execute ADMIN_CMD stored procedure"""
@@ -423,9 +420,8 @@ class Db2Db(Db):
                 logger.error(message)
                 return {"status": -1, "message": message}
         except Exception as e:
-            message = f"Failed to execute ADMIN_CMD stored procedure: {params}. {e}"
-            logger.error(message)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to execute ADMIN_CMD stored procedure: {params}. {e}")
+            raise
 
     def add_partition(self, table, partition_name, boundary=None, in_tbs=None, idx_tbs=None):
         sql = f"alter table {table} add partition {partition_name} {boundary}"

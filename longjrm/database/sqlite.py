@@ -42,20 +42,6 @@ class SqliteDb(Db):
             return json.dumps(value, ensure_ascii=False)
         return super()._process_value(value)
 
-    def _bulk_insert(self, table, data_list, return_columns=None, bulk_size=1000):
-        """
-        SQLite specific bulk insert with validation.
-        """
-        if data_list:
-            # Validate column consistency
-            first_row = data_list[0]
-            keys_set = set(first_row.keys())
-            for i, row in enumerate(data_list):
-                if set(row.keys()) != keys_set:
-                    raise ValueError(f"Inconsistent columns at row {i}")
-                    
-        return super()._bulk_insert(table, data_list, return_columns, bulk_size)
-    
     def get_cursor(self):
         """Get a SQLite cursor with Row factory for dictionary-style access."""
         cursor = self.conn.cursor()
@@ -128,15 +114,9 @@ class SqliteDb(Db):
             import traceback
             import logging
             logger = logging.getLogger(__name__)
-            message = f'Failed to execute query: {e}'
-            logger.error(message)
+            logger.error(f'Failed to execute query: {e}')
             logger.error(traceback.format_exc())
-            return {
-                'status': -1,
-                'message': message,
-                'data': [],
-                'count': 0
-            }
+            raise
 
     def execute(self, sql, arr_values=None):
         """

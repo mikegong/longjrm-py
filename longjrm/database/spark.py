@@ -167,13 +167,7 @@ class SparkDb(Db):
             
         except Exception as e:
             logger.error(f"Spark query failed: {e}", exc_info=True)
-            return {
-                "status": -1,
-                "message": f"Query failed: {e}",
-                "data": [],
-                "columns": [],
-                "count": 0
-            }
+            raise
     
     def stream_query(self, sql, arr_values=None, *, max_error_count=0):
         """
@@ -222,12 +216,7 @@ class SparkDb(Db):
             
         except Exception as e:
             logger.error(f"Spark execute failed: {e}", exc_info=True)
-            return {
-                "status": -1,
-                "message": f"Execute failed: {e}",
-                "data": [],
-                "count": 0
-            }
+            raise
     
     def _single_insert(self, table, data, return_columns=None):
         """
@@ -260,9 +249,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": 1}
             
         except Exception as e:
-            message = f"Spark insert failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark insert failed: {e}", exc_info=True)
+            raise
     
     def _bulk_insert(self, table, data_list, return_columns=None, bulk_size=1000):
         """
@@ -298,9 +286,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_inserted}
             
         except Exception as e:
-            message = f"Spark bulk insert failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark bulk insert failed: {e}", exc_info=True)
+            raise
     
     def update(self, table, data, where=None):
         """
@@ -333,9 +320,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": -1}
             
         except Exception as e:
-            message = f"Spark update failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark update failed: {e}", exc_info=True)
+            raise
     
     def delete(self, table, where=None):
         """
@@ -367,9 +353,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": -1}
             
         except Exception as e:
-            message = f"Spark delete failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark delete failed: {e}", exc_info=True)
+            raise
     
     def merge(self, table, data, key_columns, column_meta=None, update_columns=None, 
               no_update='N', bulk_size=0):
@@ -447,9 +432,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": count}
             
         except Exception as e:
-            message = f"Spark merge failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark merge failed: {e}", exc_info=True)
+            raise
     
     def _build_condition_string(self, where):
         """Build SQL condition string from where dict."""
@@ -620,9 +604,8 @@ class SparkDb(Db):
                 raise ValueError(f"Unknown source_type: {source_type}. Use 'file' or 'cursor'.")
                 
         except Exception as e:
-            message = f"Spark bulk_load failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark bulk_load failed: {e}", exc_info=True)
+            raise
 
 
 class _SparkCursor:
