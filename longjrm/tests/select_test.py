@@ -301,7 +301,77 @@ def test_sql_database(db_key, backend=PoolBackend.DBUTILS):
             metadata = json.loads(metadata)
         assert metadata["level"] == "Senior", "Should have correct metadata level"
         print("SUCCESS: JSON metadata handling test passed")
-        
+
+        # Insert one record with a NULL department to exercise NULL handling.
+        # (Departments so far: Engineering x3, Sales x1, Marketing x1.)
+        db.insert("test_users", {
+            "name": "Frank Miller", "email": "frank@selecttest.com", "age": 50,
+            "status": "active", "department": None, "salary": 80000.00,
+            "metadata": {"level": "Director"}, "tags": "ops"
+        })
+
+        # Test 14: NOT IN operator (regular form)
+        print("\n--- Test 14: NOT IN Operator ---")
+        result = db.select("test_users", ["name", "department"],
+                           where={"department": {"NOT IN": ["Engineering", "Sales"]}})
+        print(f"NOT IN result: {result}")
+        # Marketing (Diana) matches; the NULL-department row is excluded by NOT IN.
+        depts = sorted(r["department"] for r in result["data"])
+        assert depts == ["Marketing"], f"NOT IN should return only Marketing, got {depts}"
+        print("SUCCESS: NOT IN operator test passed")
+
+        # Test 15: Comprehensive IN with a list value
+        print("\n--- Test 15: Comprehensive IN ---")
+        result = db.select("test_users", ["name", "age"],
+                           where={"age": {"operator": "IN", "value": [28, 35], "placeholder": "Y"}})
+        print(f"Comprehensive IN result: {result}")
+        ages = sorted(r["age"] for r in result["data"])
+        assert ages == [28, 35], f"Comprehensive IN should match ages 28 and 35, got {ages}"
+        print("SUCCESS: Comprehensive IN test passed")
+
+        # Test 16: $in / $nin logical operators
+        print("\n--- Test 16: $in and $nin Operators ---")
+        result = db.select("test_users", ["name", "department"],
+                           where={"$in": {"department": ["Sales", "Marketing"]}})
+        print(f"$in result: {result}")
+        assert len(result["data"]) == 2, "Should match Sales + Marketing (2 records)"
+        result = db.select("test_users", ["name", "department"],
+                           where={"email": {"LIKE": "%@selecttest.com"},
+                                  "$nin": {"department": ["Engineering"]}})
+        print(f"$nin result: {result}")
+        # Non-Engineering, non-NULL departments: Sales + Marketing = 2 (NULL excluded by NOT IN).
+        assert len(result["data"]) == 2, "$nin Engineering should exclude Engineering and NULL rows"
+        print("SUCCESS: $in / $nin operators test passed")
+
+        # Test 17: IS NULL (None value)
+        print("\n--- Test 17: IS NULL ---")
+        result = db.select("test_users", ["name"], where={"department": None})
+        print(f"IS NULL result: {result}")
+        assert len(result["data"]) == 1, "Should return the one NULL-department record"
+        assert result["data"][0]["name"] == "Frank Miller", "NULL row should be Frank Miller"
+        print("SUCCESS: IS NULL test passed")
+
+        # Test 18: IS NOT NULL (!= None)
+        print("\n--- Test 18: IS NOT NULL ---")
+        result = db.select("test_users", ["name", "department"],
+                           where={"email": {"LIKE": "%@selecttest.com"},
+                                  "department": {"!=": None}})
+        print(f"IS NOT NULL result: {result}")
+        assert len(result["data"]) == 5, "Should return the 5 non-NULL-department records"
+        for r in result["data"]:
+            assert r["department"] is not None, "No NULL departments expected"
+        print("SUCCESS: IS NOT NULL test passed")
+
+        # Test 19: IN list containing None (value OR NULL)
+        print("\n--- Test 19: IN with None member ---")
+        result = db.select("test_users", ["name", "department"],
+                           where={"department": {"IN": ["Marketing", None]}})
+        print(f"IN-with-None result: {result}")
+        names = sorted(r["name"] for r in result["data"])
+        assert names == ["Diana Wilson", "Frank Miller"], \
+            f"IN [Marketing, None] should match Marketing OR NULL rows, got {names}"
+        print("SUCCESS: IN with None member test passed")
+
         # Clean up test data
         cleanup_test_data(db)
     

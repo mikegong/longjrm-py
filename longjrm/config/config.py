@@ -4,7 +4,6 @@ from typing import Any, Mapping, Dict
 from pathlib import Path
 import os, json, re
 from types import MappingProxyType
-from typing import Mapping
 from longjrm.connection.dsn_parts_helper import dsn_to_parts, type_from_dsn
 
 
@@ -25,11 +24,12 @@ def _expand_env(obj: Any) -> Any:
 def _read_json(path: str | os.PathLike[str]) -> dict[str, Any]:
     p = Path(path).expanduser()
     
-    # If path doesn't exist and is relative, try resolving from project root
+    # If path doesn't exist and is relative, also try resolving against the
+    # longjrm package directory (this file lives in longjrm/config/, so
+    # parent.parent is the package root, not the repository root).
     if not p.exists() and not p.is_absolute():
-        # Get project root (assuming this file is in longjrm/ directory)
-        project_root = Path(__file__).parent.parent
-        alt_path = project_root / p
+        package_root = Path(__file__).parent.parent
+        alt_path = package_root / p
         if alt_path.exists():
             p = alt_path
     
@@ -150,9 +150,6 @@ class JrmConfig:
         parsed = {name: DatabaseConfig.from_dict(d) for name, d in merged.items()}
 
         # Pull common tuning (keep units = seconds)
-        def _f(k: str, default: float) -> float:
-            v = cfg.get(k)
-            return float(v) if v is not None else default
         def _i(k: str, default: int) -> int:
             v = cfg.get(k)
             return int(v) if v is not None else default
@@ -249,9 +246,6 @@ class JrmConfig:
             
             parsed[name] = DatabaseConfig.from_dict(cfg)
 
-        def _f(name: str, default: float) -> float:
-            v = get(prefix + name)
-            return float(v) if v is not None else default
         def _i(name: str, default: int) -> int:
             v = get(prefix + name)
             return int(v) if v is not None else default

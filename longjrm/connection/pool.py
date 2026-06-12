@@ -275,6 +275,10 @@ class Pool:
         """
         Context manager for automatic client checkout/checkin.
 
+        Note: ``session_setup`` is rendered with ``str.format(**context)``, so
+        context values are interpolated into SQL verbatim. Only pass trusted
+        values (e.g. an application-controlled user id), never raw user input.
+
         Usage:
             with pool.client(user_id=123) as client:
                 db = Db(client)
@@ -378,8 +382,13 @@ class Pool:
             raise e
         finally:
             if client is not None:
-                # Always restore autocommit=True before returning to pool
-                get_connector_class(client['database_type']).set_dbapi_autocommit(_unwrap_connection(client['conn']), True)
+                # Always restore autocommit=True before returning to pool.
+                # Guarded so a dead connection (autocommit restore failing)
+                # still gets returned/closed instead of leaking from the pool.
+                try:
+                    get_connector_class(client['database_type']).set_dbapi_autocommit(_unwrap_connection(client['conn']), True)
+                except Exception as e:
+                    logger.warning(f"Failed to restore autocommit before returning connection: {e}")
 
                 # Return connection to pool
                 self.close_client(client)

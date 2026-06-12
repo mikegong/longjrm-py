@@ -78,7 +78,7 @@ class PostgresDb(Db):
                 - source_type: 'file' or 'cursor' (optional, auto-detected)
                 - format: 'text', 'csv', or 'binary' (default 'csv')
                 - delimiter: Field delimiter (default ',')
-                - header: Boolean, whether file has header (default True)
+                - header: Boolean, whether file has header (default False)
                 - columns: List of columns to load into
                 - null: Null string representation
                 - quote: Quote character (default '"')
@@ -155,8 +155,6 @@ class PostgresDb(Db):
                 else:
                     insert_sql = f"INSERT INTO {table} {source}"
                 return self.execute(insert_sql)
-            
-
 
             elif source_type == 'file':
                 # COPY FROM file/stdin
@@ -207,7 +205,10 @@ class PostgresDb(Db):
                     "data": [],
                     "count": row_count
                 }
-                
+
+            else:
+                raise ValueError(f"Unknown source_type: {source_type}. Use 'file' or 'cursor'.")
+
         except Exception as e:
             logger.error(f"Failed to bulk load into {table}: {e}", exc_info=True)
             raise

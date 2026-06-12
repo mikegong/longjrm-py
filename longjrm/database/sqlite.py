@@ -29,7 +29,6 @@ class SqliteDb(Db):
         # SQLite uses ? as placeholder
         self.placeholder = '?'
         # Enable row factory for dictionary-like access
-        # Enable row factory for dictionary-like access
         self.conn.row_factory = sqlite3.Row
 
     def _process_value(self, value):
@@ -80,79 +79,3 @@ class SqliteDb(Db):
             return f"ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_clause}"
         else:
             return f"ON CONFLICT ({conflict_cols}) DO NOTHING"
-    
-    def query(self, sql, arr_values=None):
-        """
-        Execute query with small result set, return entire result set.
-        
-        Overridden to handle SQLite Row objects conversion to dictionaries.
-        """
-        try:
-            prepared_sql, processed_values = self._prepare_sql(sql, arr_values)
-            
-            cur = self.get_cursor()
-            if processed_values is None:
-                cur.execute(prepared_sql)
-            else:
-                cur.execute(prepared_sql, processed_values)
-            rows = cur.fetchall()
-            
-            # Convert rows to regular dictionaries using cursor description
-            columns = [col[0] for col in cur.description] if cur.description else []
-            data = [dict(zip(columns, row)) for row in rows]
-            row_count = len(data)
-            
-            cur.close()
-            
-            return {
-                'status': 0,
-                'message': f'Query executed successfully. {row_count} rows returned.',
-                'data': data,
-                'count': row_count
-            }
-        except Exception as e:
-            import traceback
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f'Failed to execute query: {e}')
-            logger.error(traceback.format_exc())
-            raise
-
-    def execute(self, sql, arr_values=None):
-        """
-        Execute query with no return result set.
-        
-        Overridden to handle SQLite parameter binding issues with None.
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"Execute SQL: {sql}")
-        logger.debug(f"Execute values: {arr_values}")
-
-        cur = None
-        try:
-            cur = self.get_cursor()
-            
-            prepared_sql, processed_values = self._prepare_sql(sql, arr_values)
-            
-            logger.debug(f"Executing query: {sql}")
-            if processed_values is None:
-                cur.execute(prepared_sql)
-            else:
-                cur.execute(prepared_sql, processed_values)
-            
-            affected_rows = cur.rowcount
-            
-            success_msg = f"SQL statement succeeded. {affected_rows} rows is affected."
-            logger.info(success_msg)
-            
-            return {
-                "status": 0,
-                "message": success_msg,
-                "data": [],
-                "count": affected_rows
-            }
-                
-        finally:
-            if cur:
-                cur.close()

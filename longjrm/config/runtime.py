@@ -107,8 +107,8 @@ def _load_default_cached(_fp: Tuple[Tuple[str, str], ...]) -> JrmConfig:
     default_db = Path.cwd() / "config" / "dbinfos.json"
     if default_cfg.exists() or default_db.exists():
         return JrmConfig.from_files(
-            str(default_cfg if default_cfg.exists() else None),
-            str(default_db if default_db.exists() else None),
+            str(default_cfg) if default_cfg.exists() else None,
+            str(default_db) if default_db.exists() else None,
         )
 
     # 4) last resort: env (will raise a clear error if nothing is configured)

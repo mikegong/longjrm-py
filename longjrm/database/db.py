@@ -240,22 +240,26 @@ class Db(ABC):
                 sql, arr_values, self.placeholder
             )
             sql, processed_values = sql_utils.inject_current(sql, converted_values, self.placeholder)
+            # Escape literal % only when values will actually be bound through a
+            # pyformat driver (%s). qmark drivers (sqlite3, pyodbc, ibm_db_dbi)
+            # and statements executed without parameters take % literally, so
+            # doubling it there corrupts the SQL (e.g. '50%' stored as '50%%').
+            if processed_values and self.placeholder == '%s':
+                sql = self._escape_sql(sql)
         else:
             processed_values = arr_values
-            
-        # Escape SQL for database-specific requirements
-        sql = self._escape_sql(sql)
+
         return sql, processed_values
 
     def _escape_sql(self, sql):
         """
-        Handles escaping of special characters (like %) that might conflict
-        with parameterized query placeholders.
-        Default implementation handles standard SQL escaping (Postgres/MySQL).
-        
+        Escape literal % as %% so it survives pyformat parameter substitution
+        (psycopg/pymysql). Only applied when parameters are bound and the
+        placeholder is %s — see _prepare_sql.
+
         Args:
             sql: SQL string to escape
-        
+
         Returns:
             Escaped SQL string
         """
@@ -342,6 +346,13 @@ class Db(ABC):
                 - row_number: 1-indexed sequence number of the row (0 if error before any rows)
                 - row_dict: dictionary with column-value pairs ({} if error)
                 - status: 0 for success, -1 for error
+
+        Raises:
+            Exception: the underlying driver error once more than
+                ``max_error_count`` row-level errors have occurred (hard
+                failure). Errors during query setup/execution are reported as a
+                single ``(0, {}, -1)`` yield instead, per the streaming
+                partial-failure contract.
         """
         row_number = 0
         current_error_count = 0
@@ -349,18 +360,23 @@ class Db(ABC):
         logger.debug(f"Query to stream: {sql}")
 
         try:
-            # Get stream cursor from subclass (PostgresDb/MySQLDb provide their specific cursor types)
-            cur = self.get_stream_cursor()
-            
-            # Prepare SQL with placeholder conversion and escaping
-            sql, processed_values = self._prepare_sql(sql, arr_values)
-            
-            if processed_values:
-                cur.execute(sql, processed_values)
-            else:
-                cur.execute(sql)
-            logger.debug(f"Stream query executed: {sql}")
-            
+            try:
+                # Get stream cursor from subclass (PostgresDb/MySQLDb provide their specific cursor types)
+                cur = self.get_stream_cursor()
+
+                # Prepare SQL with placeholder conversion and escaping
+                sql, processed_values = self._prepare_sql(sql, arr_values)
+
+                if processed_values:
+                    cur.execute(sql, processed_values)
+                else:
+                    cur.execute(sql)
+                logger.debug(f"Stream query executed: {sql}")
+            except Exception as e:
+                logger.error(f'stream_query failed to execute: {e}', exc_info=True)
+                yield row_number, {}, -1
+                return
+
             # Pre-fetch columns for tuple conversion if needed
             columns = []
             if cur.description:
@@ -372,36 +388,33 @@ class Db(ABC):
                     row = cur.fetchone()
                     if not row:
                         break
-                    
+
                     row_number += 1
-                    
+
                     row_dict = {}
                     if columns and not isinstance(row, dict):
                          row_dict = dict(zip(columns, row))
                     else:
                          # Assume dict-like (RealDictRow) or try conversion
                          row_dict = dict(row)
-                         
+
                     yield row_number, row_dict, 0
-                    
+
                 except Exception as e:
                     current_error_count += 1
                     logger.warning(f"Error fetching row {row_number + 1} (Error {current_error_count}/{max_error_count}): {e}")
-                    
+
                     if current_error_count > max_error_count:
+                        # Hard failure: tolerance exhausted, propagate to caller.
                         logger.error(f"Max error count ({max_error_count}) exceeded. Aborting.")
-                        raise e
-                    
+                        raise
+
                     # Yield error status for downstream handling if tolerating error
                     row_number += 1
                     yield row_number, {}, -1
-            
+
             logger.info(f"{row_number} rows sent to downstream successfully via stream")
 
-        except Exception as e:
-            logger.error(f'stream_query failed at row {row_number}: {e}', exc_info=True)
-            yield row_number, {}, -1
-        
         finally:
             if cur:
                 cur.close()
@@ -424,33 +437,27 @@ class Db(ABC):
         """
         buck_data = []
         total_rows = 0
-        last_status = 0
-        
-        try:
-            for row_num, row, status in self.stream_query(sql, arr_values, max_error_count=max_error_count):
-                total_rows = row_num
-                last_status = status
-                
-                if status == 0:
-                    buck_data.append(row)
-                    
-                    if len(buck_data) >= batch_size:
-                        logger.info(f"Batch of {len(buck_data)} rows sent to downstream (Total: {total_rows})")
-                        yield total_rows, buck_data, 0
-                        buck_data = []
-                else:
-                    # Propagate error immediately, or handle as per policy.
-                    # Legacy behavior yielded (row_number, {}, -1).
-                    yield row_num, {}, -1
-            
-            # Yield remaining rows
-            if buck_data:
-                logger.info(f"Final batch of {len(buck_data)} rows sent to downstream (Total: {total_rows})")
-                yield total_rows, buck_data, 0
-                
-        except Exception as e:
-            logger.error(f"stream_query_batch failed: {e}", exc_info=True)
-            yield total_rows, [], -1
+
+        # Tolerated row errors arrive as status -1 tuples and are forwarded;
+        # a hard failure (max_error_count exceeded) raises out of stream_query
+        # and propagates to the caller.
+        for row_num, row, status in self.stream_query(sql, arr_values, max_error_count=max_error_count):
+            total_rows = row_num
+
+            if status == 0:
+                buck_data.append(row)
+
+                if len(buck_data) >= batch_size:
+                    logger.info(f"Batch of {len(buck_data)} rows sent to downstream (Total: {total_rows})")
+                    yield total_rows, buck_data, 0
+                    buck_data = []
+            else:
+                yield row_num, {}, -1
+
+        # Yield remaining rows
+        if buck_data:
+            logger.info(f"Final batch of {len(buck_data)} rows sent to downstream (Total: {total_rows})")
+            yield total_rows, buck_data, 0
 
     def _stream_transaction_handler(self, stream, operation_func, commit_count=10000, max_error_count=0, table_name="unknown"):
         """
@@ -636,7 +643,10 @@ class Db(ABC):
         try:
             cur = self.get_cursor()
             
-            for batch in data_utils.datalist_to_dataseq(data_list, bulk_size=bulk_size):
+            # process_value_fn keeps bulk inserts serializing values exactly
+            # like single-row inserts on the same backend (lists, datetimes, ...).
+            for batch in data_utils.datalist_to_dataseq(
+                    data_list, bulk_size=bulk_size, process_value_fn=self._process_value):
                 cur.executemany(sql, batch)
                 
                 # Try to accumulate affected rows if driver supports it
@@ -664,16 +674,24 @@ class Db(ABC):
         """
         if return_columns is None:
             return_columns = []
-            
+
         columns = list(data.keys())
         str_col = ', '.join(columns)
-        
-        # Use placeholder for all values; CURRENT keywords will be injected by inject_current later
-        placeholders = [self.placeholder for _ in columns]
+
+        # Raw expressions are rendered into the SQL here (no placeholder, no
+        # bind); everything else gets a placeholder. Legacy backtick CURRENT
+        # keywords still ride through as values for inject_current.
+        placeholders = []
+        list_val = []
+        for k in columns:
+            v = data[k]
+            if isinstance(v, sql_utils.Raw):
+                placeholders.append(v.text)
+            else:
+                placeholders.append(self.placeholder)
+                list_val.append(self._process_value(v))
         str_qm = ', '.join(placeholders)
         values_sql = f"({str_qm})"
-        
-        list_val = [self._process_value(data[k]) for k in columns]
 
         sql = self._construct_insert_sql(table, str_col, values_sql, return_columns)
 
@@ -695,6 +713,15 @@ class Db(ABC):
         Process individual values for database operations
         Handles different data types: dict, list, primitives, datetime objects, None
         """
+        if isinstance(value, sql_utils.Raw):
+            # Raw is handled at SQL-construction time (insert/update/merge/
+            # where). Reaching here means a positionally-bound bulk path
+            # (bulk_update, list-form insert) that cannot inline expressions.
+            raise TypeError(
+                "Raw SQL expressions are not supported in this operation: "
+                "bulk paths bind every value by position. Use per-record "
+                "insert/update/merge, or a column DEFAULT, instead."
+            )
         if value is None:
             return None
         elif isinstance(value, dict):
@@ -707,10 +734,11 @@ class Db(ABC):
                 # For simple lists, pass as-is to database driver
                 # The driver will handle conversion (e.g., psycopg -> PostgreSQL arrays)
                 return value
+        elif isinstance(value, datetime.datetime):
+            # Must be checked before datetime.date: datetime is a date subclass.
+            return datetime.datetime.strftime(value, '%Y-%m-%d %H:%M:%S.%f')
         elif isinstance(value, datetime.date):
             return str(value)
-        elif isinstance(value, datetime.datetime):
-            return datetime.datetime.strftime(value, '%Y-%m-%d %H:%M:%S.%f')
         elif isinstance(value, str):
             return value
         else:
@@ -830,36 +858,23 @@ class Db(ABC):
         
         total_affected = 0
         cur = None
-        
-        total_affected = 0
-        cur = None
-        
+
         try:
             cur = self.get_cursor()
-            
+
             # Prepare data sequence: list of tuples (update_vals..., key_vals...)
             # We process this in batches to avoid huge memory usage for large lists
             # We implement manual batching to preserve dict structure for value extraction
             total_records = len(data_list)
-            
+
             for i in range(0, total_records, bulk_size):
                 batch = data_list[i : i + bulk_size]
                 batch_params = []
-                
+
                 for row in batch:
                     # Extract values in correct order: update columns, then key columns
-                    params = []
-                    # Add update values
-                    try:
-                        for col in update_columns:
-                             params.append(self._process_value(row.get(col)))
-                        # Add key values
-                        for col in key_columns:
-                             params.append(self._process_value(row.get(col)))
-                    except Exception as e:
-                        logger.error(f"Error processing row for bulk update: {row}. Error: {e}")
-                        continue
-                        
+                    params = [self._process_value(row.get(col)) for col in update_columns]
+                    params += [self._process_value(row.get(col)) for col in key_columns]
                     batch_params.append(tuple(params))
                 
                 if batch_params:
@@ -908,8 +923,13 @@ class Db(ABC):
         list_val = []
 
         for k, v in data.items():
+            if isinstance(v, sql_utils.Raw):
+                # Trusted SQL expression: rendered verbatim, never bound.
+                update_str += ", " + k + " = " + v.text
+                continue
+
             data_value = self._process_value(v)
-            
+
             if data_value is None:
                 update_str += ", " + k + " = NULL"
             else:
@@ -957,21 +977,35 @@ class Db(ABC):
         sql = f"DELETE FROM {table}{where_str}"
         return sql, where_values
 
+    @staticmethod
+    def _no_update_flag(no_update):
+        """
+        Normalize the historical ``no_update`` spellings to a boolean.
+        Accepts True/False/None and the legacy 'Y'/'N' strings so every backend
+        interprets the flag identically.
+        """
+        if isinstance(no_update, str):
+            return no_update.upper() == 'Y'
+        return bool(no_update)
+
     def merge(self, table, data, key_columns, no_update=None):
         """
         Merge (upsert) data in JSON format into table
         This function performs an INSERT if the record doesn't exist based on key_columns,
         or UPDATE if it does exist.
-        
+
         Args:
             table: target table name
             data: JSON data with column-value pairs {"col1": "val1", "col2": "val2"}
                   Can be a single record (dict) or list of records (list of dicts)
             key_columns: list of column names that define uniqueness for matching records
-            no_update: if True, do nothing on conflict (effectively "INSERT OR IGNORE")
+            no_update: if True (or legacy 'Y'), do nothing on conflict
+                  (effectively "INSERT OR IGNORE")
         Returns:
             dictionary with status, message, data (empty), and count (affected rows)
         """
+        no_update = self._no_update_flag(no_update)
+
         # Validate input parameters
         if not data:
             logger.warning("Merge called with empty data - no operation performed")
@@ -1038,13 +1072,28 @@ class Db(ABC):
                     raise ValueError(f"Record {i} generated different SQL than previous records. Bulk merge requires consistent schema/keys.")
                 
                 all_values.append(values)
-            
-            # Prepare SQL (handles placeholder conversion and escaping)
-            sql_template, _ = self._prepare_sql(sql_template, all_values[0] if all_values else None)
-            
+
+            # Prepare SQL per row (placeholder conversion, CURRENT-keyword
+            # injection, escaping). Injection rewrites the SQL itself, so every
+            # row must produce the same prepared statement — otherwise rows would
+            # bind against the wrong placeholders (or bind a `CURRENT ...` token
+            # as literal data).
+            prepared_sql = None
+            prepared_rows = []
+            for i, values in enumerate(all_values):
+                row_sql, row_values = self._prepare_sql(sql_template, values)
+                if prepared_sql is None:
+                    prepared_sql = row_sql
+                elif row_sql != prepared_sql:
+                    raise ValueError(
+                        f"Record {i} uses CURRENT keywords differently than previous records. "
+                        f"Bulk merge requires consistent keyword usage across rows."
+                    )
+                prepared_rows.append(row_values)
+
             # Execute batch using executemany
             cur = self.get_cursor()
-            cur.executemany(sql_template, all_values)
+            cur.executemany(prepared_sql, prepared_rows)
             total_affected = cur.rowcount if cur.rowcount >= 0 else len(data_list)
             
             success_msg = f"Bulk merge completed successfully. {total_affected} rows affected."
@@ -1087,11 +1136,16 @@ class Db(ABC):
         str_col = ', '.join(columns)
         placeholders = []
         values = []
-        
+
         for col in columns:
-            placeholders.append(self.placeholder)
-            values.append(self._process_value(data[col]))
-        
+            v = data[col]
+            if isinstance(v, sql_utils.Raw):
+                # Trusted SQL expression: rendered verbatim, never bound.
+                placeholders.append(v.text)
+            else:
+                placeholders.append(self.placeholder)
+                values.append(self._process_value(v))
+
         str_placeholders = ', '.join(placeholders)
         
         # Determine update columns (all non-key columns)
@@ -1319,7 +1373,10 @@ class Db(ABC):
         
         Note: Python's csv writer cannot differentiate None/Null and blank,
               so this method handles it properly by converting None to empty string.
-        
+
+        Note: the header row is derived from the first data row, so a query
+              returning zero rows produces an empty file even with header='Y'.
+
         Args:
             sql: SQL query to execute
             csv_file: Path to the output CSV file

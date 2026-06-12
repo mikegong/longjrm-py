@@ -435,6 +435,30 @@ result = db.select(
 )
 ```
 
+#### 4. NULL Conditions
+
+`None` is rendered as proper SQL `NULL` semantics — never `= NULL` (which is
+always unknown and silently matches nothing):
+
+```python
+# IS NULL
+db.select("users", where={"deleted_at": None})            # deleted_at IS NULL
+db.select("users", where={"deleted_at": {"=": None}})     # same
+
+# IS NOT NULL  — use the != / <> operator with None
+db.select("users", where={"deleted_at": {"!=": None}})    # deleted_at IS NOT NULL
+
+# None inside IN / NOT IN is split out automatically:
+db.select("users", where={"role": {"IN": ["admin", None]}})
+#   -> (role IN (?) OR role IS NULL)
+db.select("users", where={"$nin": {"role": ["admin", None]}})
+#   -> (role NOT IN (?) AND role IS NOT NULL)   -- avoids the NOT-IN-NULL trap
+```
+
+Only `=`/`==`/`IS` and `!=`/`<>`/`IS NOT`/`NOT` are defined against `None`. Any
+other operator with a `None` value (e.g. `{"age": {">": None}}`) raises
+`ValueError` rather than silently producing a query that matches no rows.
+
 ### Query Options
 
 Control query behavior with the `options` parameter:
@@ -625,30 +649,59 @@ user_data = {
 result = db.select(table="users", where={"id": 123})
 ```
 
-### SQL Keywords and Special Values
+### SQL Expressions and Keywords (`Raw`)
 
-Handle SQL keywords and special values with backtick escaping:
+To pass a SQL expression (rather than data) as a value, wrap it in `Raw` — or
+use the ready-made `CURRENT_TIMESTAMP` / `CURRENT_DATE` constants:
 
 ```python
-# CURRENT timestamp and date values
+from longjrm import Raw, CURRENT_TIMESTAMP, CURRENT_DATE
+
+# Server-side timestamps on insert/update/merge
+db.insert("audit_log", {
+    "event": "login",
+    "created_at": CURRENT_TIMESTAMP,        # rendered as SQL, not bound
+})
+db.update("users", {"updated_at": CURRENT_TIMESTAMP}, {"id": 123})
+db.merge("users", {"id": 1, "synced_at": CURRENT_TIMESTAMP}, ["id"])
+
+# Any SQL expression works, including dialect-specific ones
+db.select("audit_log", where={
+    "created_at": {">=": Raw("CURRENT_DATE - 7")},
+})
+
+# Bound values in raw SQL can be expressions too
+db.execute("INSERT INTO t (id, ts) VALUES (?, ?)", [5, CURRENT_TIMESTAMP])
+```
+
+`Raw` values are rendered into the generated SQL verbatim — no placeholder is
+emitted and nothing is bound. Because `Raw` instances can only be constructed
+from Python code, data deserialized from JSON can never produce one: untrusted
+input cannot escalate to SQL. **Never wrap untrusted strings in `Raw`.**
+
+Notes:
+
+- Not supported in positionally-bound bulk paths (`bulk_update`, list-form
+  `insert`) — those raise a clear `TypeError`. Use per-record operations or a
+  column `DEFAULT` instead. Bulk `merge` *is* supported when every row uses
+  the same expression for the same column.
+- The expression text must not contain bind placeholders (`%s`, `?`, `:name`).
+
+#### Legacy backtick form
+
+Backtick-escaped CURRENT keywords in plain strings are still recognized for
+backward compatibility:
+
+```python
 data = {
     "created_at": "`CURRENT TIMESTAMP`",
     "modified_date": "`CURRENT DATE`",
-    "version": "`CURRENT_TIMESTAMP`"
 }
-
-# These are handled specially and not parameterized
-result = db.select(
-    table="audit_log",
-    where={
-        "created_at": {
-            "operator": ">=",
-            "value": "`CURRENT DATE`",
-            "placeholder": "N"
-        }
-    }
-)
 ```
+
+Prefer `Raw` in new code: it is type-safe, works for any expression (not just
+the four CURRENT keywords), and — unlike the string form — cannot be triggered
+by string values arriving in untrusted JSON.
 
 ### Parameter Binding and Security
 
@@ -925,6 +978,16 @@ where = {
     "tags": {"LIKE": "%featured%"},                        # contains-like
     "id": {"NOT IN": [1, 2, 3]}                           # not in
 }
+
+# IN / NOT IN can also be written as logical operators or in comprehensive form:
+where = {"$in": {"category": ["electronics", "gadgets"]}}          # $in operator
+where = {"$nin": {"id": [1, 2, 3]}}                                # $nin operator
+where = {"id": {"operator": "IN", "value": [1, 2, 3], "placeholder": "Y"}}  # comprehensive
+
+# Empty lists are safe: IN [] -> always false, NOT IN [] -> always true.
+# A None member is handled correctly (no NOT-IN-NULL trap):
+where = {"role": {"IN": ["admin", None]}}      # -> (role IN (?) OR role IS NULL)
+where = {"$nin": {"role": ["admin", None]}}    # -> (role NOT IN (?) AND role IS NOT NULL)
 
 # Complex nested conditions
 where = {
@@ -1754,6 +1817,6 @@ exception (per-row / aggregate `status`).
 
 ### Special Values
 
-- **SQL Keywords**: Use backtick escaping like `"CURRENT TIMESTAMP"`
+- **SQL Expressions**: Use `Raw("CURRENT_TIMESTAMP")` or the `CURRENT_TIMESTAMP` / `CURRENT_DATE` constants (legacy backtick strings like `` "`CURRENT TIMESTAMP`" `` still work)
 - **Parameter Binding**: Controlled via `placeholder` option ("Y" = bind, "N" = direct)
 - **Data Types**: Automatic JSON, datetime, and array handling

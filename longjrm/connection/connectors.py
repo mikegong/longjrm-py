@@ -17,6 +17,22 @@ class JrmConnectionError(Exception):
         self.extra_info = extra_info
 
 
+def _coerce_bool(value, default=True):
+    """
+    Coerce a config/DSN option value to bool.
+
+    DSN query-string values arrive as strings ('false', '0', ...), which are
+    all truthy — interpret the common false spellings explicitly.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', '0', 'no', 'off', 'n', '')
+    return bool(value)
+
+
 class BaseConnector:
     """Base class for database connectors."""
 
@@ -43,7 +59,7 @@ class BaseConnector:
             self.user = dbinfo.get('user')
             self.password = dbinfo.get('password')
             self.database = dbinfo.get('database')
-            self.autocommit = dbinfo.get('query', {}).get('autocommit', True)
+            self.autocommit = _coerce_bool(dbinfo.get('query', {}).get('autocommit', True))
             self.options = dbinfo.get('query', {})
         else:
             self.dsn = None
@@ -52,7 +68,8 @@ class BaseConnector:
             self.user = db_cfg.user
             self.password = db_cfg.password
             self.database = db_cfg.database
-            self.autocommit = db_cfg.options.get('autocommit', True)
+            # options may carry DSN-derived string values; coerce explicitly
+            self.autocommit = _coerce_bool(db_cfg.options.get('autocommit', True))
             self.options = db_cfg.options
 
         jrm_cfg = get_config()

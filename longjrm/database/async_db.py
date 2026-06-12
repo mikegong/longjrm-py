@@ -169,8 +169,10 @@ class AsyncDb:
 
     async def merge(self, table, data, key_columns, no_update=None):
         async with self._lock:
+            # Keyword form so the flag can never bind to a backend-specific
+            # positional extra if an override ever diverges from the base.
             return await asyncio.to_thread(
-                self._sync.merge, table, data, key_columns, no_update
+                self._sync.merge, table, data, key_columns, no_update=no_update
             )
 
     # ------------------------------------------------------------------

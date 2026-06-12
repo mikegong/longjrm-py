@@ -72,8 +72,10 @@ class OracleDb(Db):
         try:
             cur = self.get_cursor()
             
-            # datalist_to_dataseq handles value serialization
-            for batch in data_utils.datalist_to_dataseq(data_list, bulk_size=bulk_size):
+            # process_value_fn keeps bulk inserts serializing values exactly
+            # like single-row inserts (lists -> JSON, datetimes passed natively)
+            for batch in data_utils.datalist_to_dataseq(
+                    data_list, bulk_size=bulk_size, process_value_fn=self._process_value):
                 cur.executemany(sql, batch)
                 if cur.rowcount > 0:
                     total_affected += cur.rowcount
@@ -172,10 +174,16 @@ class OracleDb(Db):
         """
         raise NotImplementedError("Oracle does not support INSERT ... ON CONFLICT syntax. Use merge() method instead.")
 
-    def merge(self, table, data, key_columns, column_meta=None, update_columns=None, no_update='N', bulk_size=0):
+    def merge(self, table, data, key_columns, no_update=None, *, update_columns=None):
         """
         Merge (Upsert) data into table for Oracle using MERGE INTO.
+
+        Mirrors the base ``merge(table, data, key_columns, no_update)``
+        signature (async delegation passes ``no_update`` positionally);
+        ``update_columns`` is an Oracle-specific keyword-only extra.
         """
+        no_update = self._no_update_flag(no_update)
+
         if not data:
             return {"status": 0, "message": "No data to merge", "data": [], "count": 0}
 
@@ -220,11 +228,18 @@ class OracleDb(Db):
         source_select_parts = []
         bind_index = 1
         
+        # The first row determines which columns are SQL expressions (Raw or
+        # backtick CURRENT keywords); those columns are inlined for every row.
         for k in data_keys:
             val = first_row.get(k)
-            if isinstance(val, str) and val.startswith('`') and val.endswith('`'):
-                # Raw SQL: inject directly (stripped of backticks)
-                raw_sql = val[1:-1]
+            if isinstance(val, sql_utils.Raw):
+                # Trusted SQL expression: rendered verbatim, never bound.
+                source_select_parts.append(f"{val.text} AS {k}")
+            elif isinstance(val, str) and sql_utils.check_current_keyword(val):
+                # Only the backtick-escaped CURRENT keywords are emitted as raw
+                # SQL (consistent with the rest of the library); arbitrary
+                # backtick-wrapped strings are bound like any other value.
+                raw_sql = sql_utils.unescape_current_keyword(val)
                 source_select_parts.append(f"{raw_sql} AS {k}")
             else:
                 # Normal bind: use placeholder
@@ -239,8 +254,8 @@ class OracleDb(Db):
         USING ({source_select}) source
         ON ({match_str})
         """
-        
-        if no_update != 'Y' and update_set_str:
+
+        if not no_update and update_set_str:
             sql += f" WHEN MATCHED THEN UPDATE SET {update_set_str}"
             
         sql += f" WHEN NOT MATCHED THEN INSERT ({insert_cols_str}) VALUES ({insert_vals_str})"

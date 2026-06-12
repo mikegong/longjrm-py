@@ -61,6 +61,7 @@ This innovative approach circumvents the limitations often encountered with trad
 ## Advanced Features
 
 - **Placeholder Support**: Supports both positional (`%s`, `?`) and named placeholders (`:name`, `%(name)s`, `$name`) with automatic detection and conversion
+- **SQL Expressions**: Type-safe `Raw` sentinel for server-side expressions — `from longjrm import Raw, CURRENT_TIMESTAMP` — rendered into SQL at construction time; untrusted JSON can never produce one
 
 ## Architecture
 
@@ -335,6 +336,42 @@ with pool.client() as client:
     # Insert
     db.insert("users", {"name": "Alice", "active": True})
 ```
+
+### WHERE Conditions
+
+`where` accepts JSON-style conditions. Multiple keys are AND-ed together:
+
+```python
+# Simple equality (AND-ed)
+db.select("users", where={"status": "active", "department": "Engineering"})
+
+# Operators (per-column)
+db.select("users", where={"age": {">=": 18, "<": 65}, "status": {"!=": "banned"}})
+
+# IN / NOT IN — several equivalent forms
+db.select("users", where={"role": {"IN": ["admin", "editor"]}})
+db.select("users", where={"id":   {"NOT IN": [1, 2, 3]}})
+db.select("users", where={"$in":  {"role": ["admin", "editor"]}})
+db.select("users", where={"$nin": {"id": [1, 2, 3]}})
+#   Empty lists are safe: IN [] is always false, NOT IN [] is always true.
+
+# NULL handling — None becomes proper IS [NOT] NULL, never `= NULL`
+db.select("users", where={"deleted_at": None})          # deleted_at IS NULL
+db.select("users", where={"deleted_at": {"!=": None}})  # deleted_at IS NOT NULL
+db.select("users", where={"role": {"IN": ["admin", None]}})  # role IN (?) OR role IS NULL
+
+# Logical operators
+db.select("users", where={"$or": [{"status": "active"}, {"role": "admin"}]})
+
+# SQL expressions as values (rendered into SQL, never bound) — see below
+from longjrm import Raw, CURRENT_DATE
+db.select("events", where={"created_at": {">=": Raw("CURRENT_DATE - 7")}})
+```
+
+Values are parameter-bound by default. Only `=`/`==` and `!=`/`<>` are defined
+against `None`; any other operator with `None` raises `ValueError`. See
+[docs/database.md](docs/database.md#where-conditions) for the full condition
+reference (comprehensive form, inline/`dynamic_param`, all operators).
 
 ### Streaming Export
 
@@ -741,7 +778,7 @@ longjrm/
 The `Db` class provides JSON-based CRUD operations with:
 - JSON data format for column-value pairs
 - Dynamic SQL generation with proper escaping
-- Support for SQL CURRENT keywords with backtick escaping
+- SQL expressions as values via the `Raw` sentinel (`from longjrm import Raw, CURRENT_TIMESTAMP`); legacy backtick CURRENT-keyword strings still supported
 - Placeholder handling varies by database library (`%s` for dbutils, `?` for others)
 
 ### ABC Interface Pattern

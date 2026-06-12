@@ -55,6 +55,22 @@ The whole data API now obeys this (the historical `insert`/`bulk_update`/
 converted to raise). Streaming is the only `status: -1` path left. Full
 rationale: docs/database.md → "The Error Contract".
 
+## SQL expressions in values (invariant)
+
+`Raw` ([longjrm/utils/sql.py](longjrm/utils/sql.py), exported from the
+package root) is the only type-safe way to pass a SQL expression as a
+value: constructors and WHERE parsers recognize it by `isinstance` and
+render it at SQL-construction time, so JSON-deserialized data can never
+produce one. The backtick CURRENT-keyword strings (`` `CURRENT TIMESTAMP` ``)
+are kept for backward compatibility only.
+
+**Never extend string-content-based SQL detection.** Any scheme that
+promotes a string to SQL based on its content (new entries in
+`CURRENT_KEYWORDS`, prefix/wrapper conventions, substring checks) can be
+triggered by values arriving in untrusted JSON — that's an injection
+vector by construction. When a new expression need comes up, the answer is
+`Raw(...)`, not a new magic string.
+
 ## Async API design (Strategy A: threadpool-backed)
 
 This is the load-bearing design decision in 0.2.0 and the one most likely
