@@ -9,3 +9,5 @@ longjrm.egg-info
 __pycache__
 build
 dist
+test.db
+logs

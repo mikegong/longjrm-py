@@ -126,27 +126,20 @@ class OracleDb(Db):
         """
         if arr_values is None:
             arr_values = []
-            
-        # First, ensure placeholders and current keywords are handled standardly
-        # Base Db handles processing values, but we need to intercept SQL structure
-        
-        # We process values first to get the clean list
+
         processed_values = []
         if arr_values:
-            # Re-implement basics of base _prepare_sql but target Oracle style
-            
-            # 1. Convert any named placeholders to positional if present (generic logic)
-            # But standard Db logic uses %s. We assume input SQL uses %s.
-            
-            # Check for generic named params if used? Typically we standardize on %s internally.
-            # Assuming input is standard %s style from internal constructors.
-            
-            # 2. Inject current time keywords
+            # 1. Normalize positional placeholders to the internal %s style FIRST.
+            #    Callers (and the framework itself, e.g. job.py windowing) use the
+            #    standard '?' qmark; without this normalization '?' is left untouched
+            #    and Oracle's driver reports zero binds for N provided values
+            #    (DPY-4009). A query already written with %s is left unchanged.
+            sql, arr_values = self.placeholder_handler.convert_to_positional(sql, arr_values, '%s')
+
+            # 2. Inject current-time keywords (operates on the %s form).
             sql, processed_values = sql_utils.inject_current(sql, arr_values, '%s')
-            
-            # 3. Convert all %s to :1, :2, :3...
-            # We can use a regex sub with a counter
-            
+
+            # 3. Convert all %s to Oracle's positional :1, :2, :3 ... binds.
             parts = sql.split('%s')
             if len(parts) > 1:
                 new_sql = ""
@@ -154,7 +147,7 @@ class OracleDb(Db):
                     new_sql += f"{part}:{i+1}"
                 new_sql += parts[-1]
                 sql = new_sql
-                
+
         else:
             processed_values = arr_values
 

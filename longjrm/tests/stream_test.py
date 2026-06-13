@@ -1,7 +1,8 @@
 """
 JRM Stream Operations Test Suite
 
-Tests for stream_query and stream_insert functionality.
+Tests for stream_query, stream_select, stream_insert, stream_update and
+stream_merge functionality.
 
 To run this test, you have two options:
 
@@ -306,6 +307,92 @@ def test_stream_query_sql(db_key, backend=PoolBackend.DBUTILS):
     
     pools[db_key].dispose()
     print(f"SUCCESS: {db_key} stream_query connection closed")
+
+def test_stream_select_sql(db_key, backend=PoolBackend.DBUTILS):
+    """Test stream_select functionality for SQL databases (MySQL/PostgreSQL)"""
+    print(f"\n=== Testing {db_key} stream_select Operations with {backend.value} backend ===")
+
+    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+    configure(cfg)
+    db_cfg = cfg.require(db_key)
+
+    pools = {}
+    pools[db_key] = Pool.from_config(db_cfg, backend)
+
+    with pools[db_key].client() as client:
+        db = get_db(client)
+        print(f"Connected to {db.database_type} database: {db.database_name}")
+
+        # Set up test data
+        if not setup_test_data(db, db.database_type):
+            print("ERROR: Could not set up test data, aborting tests")
+            return
+
+        # Test 1: Basic streaming select - stream all rows (limit:0 = no cap)
+        print("\n--- Test 1: Basic Streaming Select (limit:0 streams all) ---")
+        rows_collected = []
+        row_numbers = []
+        for row_num, row, status in db.stream_select(
+                "test_stream_users",
+                columns=["id", "name", "email", "age", "department"],
+                options={"limit": 0, "order_by": ["id"]}):
+            if status == 0:
+                rows_collected.append(row)
+                row_numbers.append(row_num)
+        assert len(rows_collected) == 5, f"Should stream 5 rows, got {len(rows_collected)}"
+        assert row_numbers == [1, 2, 3, 4, 5], f"Row numbers should be sequential 1-5, got {row_numbers}"
+        assert all("id" in row for row in rows_collected), "All rows should have 'id' column"
+        assert all("name" in row for row in rows_collected), "All rows should have 'name' column"
+        print("SUCCESS: Basic streaming select passed")
+
+        # Test 2: Streaming select with a where filter
+        print("\n--- Test 2: Streaming Select with Filter ---")
+        engineering = []
+        for row_num, row, status in db.stream_select(
+                "test_stream_users", columns=["name", "department"],
+                where={"department": "Engineering"}, options={"limit": 0}):
+            if status == 0:
+                engineering.append(row)
+                assert row["department"] == "Engineering", "All rows should be Engineering"
+        assert len(engineering) == 3, f"Should have 3 Engineering rows, got {len(engineering)}"
+        print(f"SUCCESS: Filtered {len(engineering)} Engineering rows")
+
+        # Test 3: fetch limit is honored -- explicit limit caps, limit:0 streams all
+        print("\n--- Test 3: Fetch Limit Honored ---")
+        capped = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=["id"],
+            options={"limit": 2, "order_by": ["id"]}) if status == 0]
+        assert len(capped) == 2, f"limit:2 should cap the stream to 2 rows, got {len(capped)}"
+        uncapped = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=["id"], options={"limit": 0}) if status == 0]
+        assert len(uncapped) == 5, f"limit:0 should stream all 5 rows, got {len(uncapped)}"
+        print("SUCCESS: Fetch limit honored (cap=2, all=5)")
+
+        # Test 4: stream_select agrees with buffered select
+        print("\n--- Test 4: Compare stream_select vs select ---")
+        opts = {"limit": 0, "order_by": ["id"]}
+        cols = ["id", "name", "email"]
+        regular = db.select("test_stream_users", columns=cols, options=opts)["data"]
+        streamed = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=cols, options=opts) if status == 0]
+        assert len(streamed) == len(regular), "stream_select and select should return the same count"
+        for s, r in zip(streamed, regular):
+            assert s["id"] == r["id"], "id mismatch between stream_select and select"
+            assert s["name"] == r["name"], "name mismatch between stream_select and select"
+        print(f"SUCCESS: stream_select matches select ({len(streamed)} rows)")
+
+        # Test 5: Streaming select with no results
+        print("\n--- Test 5: Streaming Select with No Results ---")
+        empty = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=["id"],
+            where={"email": "nonexistent@test.com"}, options={"limit": 0}) if status == 0]
+        assert len(empty) == 0, "Should stream no rows for a non-existent email"
+        print("SUCCESS: No results streaming select passed")
+
+        cleanup_test_data(db)
+
+    pools[db_key].dispose()
+    print(f"SUCCESS: {db_key} stream_select connection closed")
 
 def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
     """Test stream_insert functionality for SQL databases (MySQL/PostgreSQL)"""
@@ -993,10 +1080,30 @@ if __name__ == "__main__":
             traceback.print_exc()
             sys.exit(1)
     
+    # Test stream_select
+    print("\n" + "="*60)
+    print("PART 5: Testing stream_select")
+    print("="*60)
+
+    for db_key, backend in test_combinations:
+        try:
+            db_cfg = cfg.require(db_key)
+            print(f"\n>>> Running stream_select tests with {db_key} using {backend.value} backend")
+            test_stream_select_sql(db_key, backend)
+            print(f"SUCCESS: {db_key} ({backend.value}) stream_select tests completed")
+            combinations_tested += 1
+        except KeyError:
+            print(f"WARNING: {db_key} configuration not found, skipping...")
+        except Exception as e:
+            print(f"FAILED: {db_key} ({backend.value}) stream_select tests failed: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+
     if combinations_tested == 0:
         print("ERROR: No database configurations found")
         sys.exit(1)
-    
+
     # Test error handling
     print("\n" + "="*60)
     print("PART 7: Testing Error Handling")

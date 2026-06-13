@@ -255,6 +255,15 @@ class AsyncDb:
         )
         return _AsyncGenAdapter(gen, self._lock)
 
+    def stream_select(self, table, columns=None, where=None, options=None, *, max_error_count=0) -> _AsyncGenAdapter:
+        """Async-iterate a SELECT without buffering -- the streaming counterpart of
+        select(). Same SQL as select() (data_fetch_limit default applies; pass
+        options={"limit": 0} to stream all). Yields (row_number, row_dict, status)."""
+        gen = self._sync.stream_select(
+            table, columns=columns, where=where, options=options,
+            max_error_count=max_error_count)
+        return _AsyncGenAdapter(gen, self._lock)
+
     # ------------------------------------------------------------------
     # Streaming writes (Phase 2)
     #

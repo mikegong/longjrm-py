@@ -544,6 +544,18 @@ class Db(ABC):
             if commit_count != 0:
                 self.set_autocommit(autocommit_was_enabled)
 
+    def stream_select(self, table, columns=None, where=None, options=None, *, max_error_count=0):
+        """
+        Stream a SELECT row by row without buffering the whole result set -- the
+        streaming counterpart of select(). Builds the same SQL as select() via
+        _select_constructor, so the data_fetch_limit default still applies: pass
+        options={"limit": 0} to stream an entire (large) table on purpose.
+
+        Yields the same tuples as stream_query: (row_number, row_dict, status).
+        """
+        sql, arr_values = self._select_constructor(table, columns, where, options)
+        return self.stream_query(sql, arr_values, max_error_count=max_error_count)
+
     def stream_insert(self, stream, table, *, commit_count=10000, max_error_count=0):
         """
         Insert stream data into table with optional periodic commits.
