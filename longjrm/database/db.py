@@ -331,16 +331,19 @@ class Db(ABC):
             if cur:
                 cur.close()
 
-    def stream_query(self, sql, arr_values=None, *, max_error_count=0):
+    def stream_query(self, sql, arr_values=None, *, max_error_count=0, reject_sink=None):
         """
         Execute query and stream results row by row using generator.
         This is memory-efficient for large result sets as it doesn't load all rows at once.
-        
+
         Args:
             sql: SQL statement to execute
             arr_values: values to bind to query (supports positional and named placeholders)
             max_error_count: Maximum number of errors to tolerate before failing (default 0)
-            
+            reject_sink: optional callable(row_number, row, reason) invoked when a row
+                cannot be fetched. The row's data is unavailable at fetch failure, so the
+                payload is {}; the sink still records the reason. Must not raise.
+
         Yields:
             tuple of (row_number, row_dict, status):
                 - row_number: 1-indexed sequence number of the row (0 if error before any rows)
@@ -374,6 +377,8 @@ class Db(ABC):
                 logger.debug(f"Stream query executed: {sql}")
             except Exception as e:
                 logger.error(f'stream_query failed to execute: {e}', exc_info=True)
+                if reject_sink is not None:
+                    reject_sink(row_number, {}, f"stream_query setup failed: {e}")
                 yield row_number, {}, -1
                 return
 
@@ -407,10 +412,14 @@ class Db(ABC):
                     if current_error_count > max_error_count:
                         # Hard failure: tolerance exhausted, propagate to caller.
                         logger.error(f"Max error count ({max_error_count}) exceeded. Aborting.")
+                        if reject_sink is not None:
+                            reject_sink(row_number + 1, {}, f"fetch failed: {e}")
                         raise
 
                     # Yield error status for downstream handling if tolerating error
                     row_number += 1
+                    if reject_sink is not None:
+                        reject_sink(row_number, {}, f"fetch failed: {e}")
                     yield row_number, {}, -1
 
             logger.info(f"{row_number} rows sent to downstream successfully via stream")
@@ -459,24 +468,29 @@ class Db(ABC):
             logger.info(f"Final batch of {len(buck_data)} rows sent to downstream (Total: {total_rows})")
             yield total_rows, buck_data, 0
 
-    def _stream_transaction_handler(self, stream, operation_func, commit_count=10000, max_error_count=0, table_name="unknown"):
+    def _stream_transaction_handler(self, stream, operation_func, commit_count=10000, max_error_count=0, table_name="unknown", *, reject_sink=None):
         """
         Generic handler for stream-based transactional operations (insert/update/merge).
-        
+
         Args:
             stream: Iterator yielding rows
             operation_func: Callable(row, row_number) -> result_dict
             commit_count: Rows between commits (0 to disable manual commit control)
             max_error_count: Max errors allowed
             table_name: Name of table for logging
-            
+            reject_sink: optional callable(row_number, row, reason) invoked for every
+                rejected row (both tolerated and the final aborting one) so callers can
+                persist rejects. It MUST NOT raise and MUST NOT write through this same
+                connection (a rollback on max_error_count would erase its writes).
+
         Returns:
-            Result dictionary
+            Result dictionary (carries reject_count alongside record_count)
         """
         row_number = 0
         result = {}
         autocommit_was_enabled = True
         current_error_count = 0
+        reject_count = 0
         
         try:
             if commit_count != 0:
@@ -494,25 +508,59 @@ class Db(ABC):
                 # Check upstream status
                 if row_status != 0:
                     current_error_count += 1
+                    reject_count += 1
                     message = f"Upstream error at row {row_number} to table {table_name} (Error {current_error_count}/{max_error_count})"
                     logger.warning(message)
-                    
+                    if reject_sink is not None:
+                        reject_sink(row_number, row, message)
+
                     if current_error_count > max_error_count:
                         if commit_count != 0: self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
+                        return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": message}
                     continue
                 
-                # Execute operation
-                result = operation_func(row, row_number)
-                
+                # Execute operation. By default a per-row driver error raises and
+                # is handled as a fatal stream error below (original behavior). When
+                # reject handling is requested (a sink, or max_error_count > 0), the
+                # row is instead isolated by a SAVEPOINT so a bad row can be rolled
+                # back and recorded as a per-row reject without poisoning the batch
+                # transaction (Postgres aborts the whole tx on error; the savepoint
+                # confines that). The savepoint path is opt-in, so the default load
+                # keeps its exact behavior and adds no per-row round-trips.
+                tolerant = reject_sink is not None or max_error_count > 0
+                savepoint = None
+                if tolerant and commit_count != 0:
+                    savepoint = f"jrm_sp_{row_number}"
+                    self.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    result = operation_func(row, row_number)
+                except Exception as op_error:
+                    if not tolerant:
+                        raise
+                    result = {"status": -1, "message": str(op_error)}
+                    if savepoint is not None:
+                        try:
+                            self.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        except Exception:
+                            pass
+                else:
+                    if savepoint is not None:
+                        try:
+                            self.execute(f"RELEASE SAVEPOINT {savepoint}")
+                        except Exception:
+                            pass
+
                 if result.get('status') != 0:
                     current_error_count += 1
+                    reject_count += 1
                     message = f"Failed to process row {row_number} in {table_name} (Error {current_error_count}/{max_error_count}): {result.get('message', 'Unknown error')}"
                     logger.warning(message)
-                    
+                    if reject_sink is not None:
+                        reject_sink(row_number, row, message)
+
                     if current_error_count > max_error_count:
                         if commit_count != 0: self.rollback()
-                        return {"status": -1, "record_count": row_number, "message": message}
+                        return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": message}
                     continue
                 
                 # Periodic commit
@@ -524,21 +572,21 @@ class Db(ABC):
             if row_number == 0:
                 message = f"Incoming stream for {table_name} is empty"
                 logger.info(message)
-                return {"status": 0, "record_count": 0, "message": message}
-                
+                return {"status": 0, "record_count": 0, "reject_count": reject_count, "message": message}
+
             if commit_count != 0:
                 self.commit()
-                
+
             message = f"{row_number} rows processed into {table_name} successfully"
             logger.info(message)
-            return {"status": 0, "record_count": row_number, "message": message}
+            return {"status": 0, "record_count": row_number, "reject_count": reject_count, "message": message}
 
         except Exception as e:
             error_message = f"Fatal database error at row {row_number}: {e}"
             logger.error(error_message, exc_info=True)
             if commit_count != 0:
                 self.rollback()
-            return {"status": -1, "record_count": row_number, "message": error_message}
+            return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": error_message}
             
         finally:
             if commit_count != 0:
@@ -556,18 +604,18 @@ class Db(ABC):
         sql, arr_values = self._select_constructor(table, columns, where, options)
         return self.stream_query(sql, arr_values, max_error_count=max_error_count)
 
-    def stream_insert(self, stream, table, *, commit_count=10000, max_error_count=0):
+    def stream_insert(self, stream, table, *, commit_count=10000, max_error_count=0, reject_sink=None):
         """
         Insert stream data into table with optional periodic commits.
         """
         def op(row, _):
             return self.insert(table, row)
-            
+
         return self._stream_transaction_handler(
-            stream, op, commit_count, max_error_count, table_name=table
+            stream, op, commit_count, max_error_count, table_name=table, reject_sink=reject_sink
         )
 
-    def stream_update(self, stream, table, *, commit_count=10000, max_error_count=0):
+    def stream_update(self, stream, table, *, commit_count=10000, max_error_count=0, reject_sink=None):
         """
         Update table from stream data with optional periodic commits.
         """
@@ -575,20 +623,20 @@ class Db(ABC):
             if not isinstance(row, dict) or 'data' not in row or 'condition' not in row:
                 return {"status": -1, "message": "Invalid row format: expected dict with 'data' and 'condition'"}
             return self.update(table, row['data'], row['condition'])
-            
+
         return self._stream_transaction_handler(
-            stream, op, commit_count, max_error_count, table_name=table
+            stream, op, commit_count, max_error_count, table_name=table, reject_sink=reject_sink
         )
 
-    def stream_merge(self, stream, table, key_columns, *, commit_count=10000, max_error_count=0):
+    def stream_merge(self, stream, table, key_columns, *, commit_count=10000, max_error_count=0, reject_sink=None):
         """
         Merge (upsert) stream data into table with optional periodic commits.
         """
         def op(row, _):
             return self.merge(table, row, key_columns)
-            
+
         return self._stream_transaction_handler(
-            stream, op, commit_count, max_error_count, table_name=table
+            stream, op, commit_count, max_error_count, table_name=table, reject_sink=reject_sink
         )
 
     def insert(self, table, data, return_columns=None, bulk_size=1000):
