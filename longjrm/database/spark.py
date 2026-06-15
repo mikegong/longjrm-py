@@ -9,7 +9,7 @@ Supports:
 import logging
 import json
 from datetime import datetime
-from longjrm.database.db import Db
+from longjrm.database.db import Db, rows_alias
 from longjrm.utils import sql as sql_utils
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,7 @@ class SparkDb(Db):
         
         return result_sql, None
     
+    @rows_alias(count="rows_read")
     def query(self, sql, arr_values=None):
         """
         Execute query and return results.
@@ -367,6 +368,7 @@ class SparkDb(Db):
             logger.error(f"Spark delete failed: {e}", exc_info=True)
             raise
     
+    @rows_alias(count="rows_merged")
     def merge(self, table, data, key_columns, no_update=None, *, update_columns=None):
         """
         Merge (upsert) data into Delta Lake table using pure SQL.

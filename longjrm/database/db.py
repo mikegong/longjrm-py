@@ -10,6 +10,7 @@ where condition - json data that defines where column and value pairs
 import json
 import re
 import datetime
+import functools
 import logging
 import traceback
 from abc import ABC, abstractmethod
@@ -20,6 +21,35 @@ from longjrm.utils import sql as sql_utils, data as data_utils
 
 
 logger = logging.getLogger(__name__)
+
+
+def rows_alias(**mapping):
+    """Decorator: expose data-engineering ``rows_*`` keys on a method's result dict.
+
+    longjrm has historically returned ``count`` (rows affected/returned),
+    ``record_count``/``reject_count`` (streams), and ``row_count`` (file ops).
+    This additively copies each such key to its ``rows_*`` alias
+    (``mapping`` is ``old_key -> new_key``) AFTER the wrapped method returns, so
+    callers can read the standard names (``rows_read``, ``rows_inserted``,
+    ``rows_updated``, ``rows_deleted``, ``rows_merged``, ``rows_rejected``, ...).
+
+    Non-breaking and opt-in by design: the old keys remain, so existing callers are
+    untouched -- in particular ``count`` is intentionally NOT deprecated. Generic
+    cases without a single clear verb (``execute``'s affected count; the
+    write-vs-return overload of ``count``; per-row net writes on streams) are left
+    for a future major version.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            result = fn(*args, **kwargs)
+            if isinstance(result, dict):
+                for old, new in mapping.items():
+                    if old in result and new not in result:
+                        result[new] = result[old]
+            return result
+        return wrapper
+    return decorator
 
 class Db(ABC):
     """
@@ -266,6 +296,7 @@ class Db(ABC):
         # Replace standalone % with %% (escape them) but leave %s placeholders alone
         return re.sub(r'%(?!s)', '%%', sql)
 
+    @rows_alias(count="rows_read")
     def query(self, sql, arr_values=None):
         """
         Execute query with small result set, return entire result set.
@@ -604,6 +635,7 @@ class Db(ABC):
         sql, arr_values = self._select_constructor(table, columns, where, options)
         return self.stream_query(sql, arr_values, max_error_count=max_error_count)
 
+    @rows_alias(record_count="rows_read", reject_count="rows_rejected")
     def stream_insert(self, stream, table, *, commit_count=10000, max_error_count=0, reject_sink=None):
         """
         Insert stream data into table with optional periodic commits.
@@ -628,6 +660,7 @@ class Db(ABC):
             stream, op, commit_count, max_error_count, table_name=table, reject_sink=reject_sink
         )
 
+    @rows_alias(record_count="rows_read", reject_count="rows_rejected")
     def stream_merge(self, stream, table, key_columns, *, commit_count=10000, max_error_count=0, reject_sink=None):
         """
         Merge (upsert) stream data into table with optional periodic commits.
@@ -639,6 +672,7 @@ class Db(ABC):
             stream, op, commit_count, max_error_count, table_name=table, reject_sink=reject_sink
         )
 
+    @rows_alias(count="rows_inserted")
     def insert(self, table, data, return_columns=None, bulk_size=1000):
         """
         Insert data in JSON format into table
@@ -856,6 +890,7 @@ class Db(ABC):
             if cur:
                 cur.close()
 
+    @rows_alias(count="rows_updated")
     def update(self, table, data, where=None):
         """
         Update data in JSON format to table
@@ -880,6 +915,7 @@ class Db(ABC):
         update_query, arr_values = self._update_constructor(table, data, where)
         return self.execute(update_query, arr_values)
 
+    @rows_alias(count="rows_updated")
     def bulk_update(self, table, data_list, key_columns, bulk_size=1000):
         """
         Update multiple rows in bulk using executemany for performance.
@@ -1008,6 +1044,7 @@ class Db(ABC):
         sql = f"UPDATE {table} SET {update_str}{where_str}"
         return sql, all_values
 
+    @rows_alias(count="rows_deleted")
     def delete(self, table, where=None):
         """
         Delete data from table based on where conditions
@@ -1048,6 +1085,7 @@ class Db(ABC):
             return no_update.upper() == 'Y'
         return bool(no_update)
 
+    @rows_alias(count="rows_merged")
     def merge(self, table, data, key_columns, no_update=None):
         """
         Merge (upsert) data in JSON format into table
@@ -1221,6 +1259,7 @@ class Db(ABC):
         
         return sql, values
 
+    @rows_alias(count="rows_merged")
     def merge_select(self, source_table, target_table, insert_columns, key_columns,
                      order_by=None, conditions=None, source_select=None, update_columns=None,
                      isolation_clause='', dynamic_param='Y'):

@@ -1809,6 +1809,32 @@ On **failure**, operations raise rather than returning `status: -1` — see
 [The Error Contract](#the-error-contract). Streaming methods are the documented
 exception (per-row / aggregate `status`).
 
+#### `rows_*` count aliases (data-engineering naming)
+
+Alongside the historical count keys, operations also expose the standard
+data-engineering `rows_*` names, so result counts read uniformly across a
+pipeline. **Additive and non-breaking** — the old keys stay (`count` is *not*
+deprecated); the alias is added only when its source key is present:
+
+| Method(s) | Old key | `rows_*` alias |
+|-----------|---------|----------------|
+| `query` / `select` | `count` | `rows_read` |
+| `insert` | `count` | `rows_inserted` |
+| `update` / `bulk_update` | `count` | `rows_updated` |
+| `delete` | `count` | `rows_deleted` |
+| `merge` / `merge_select` | `count` | `rows_merged` |
+| `stream_insert` / `stream_merge` | `record_count` / `reject_count` | `rows_read` / `rows_rejected` |
+
+```python
+r = db.insert("orders", row)
+r["count"]          # 1  (still works)
+r["rows_inserted"]  # 1  (same value, standard name)
+```
+
+Generic cases without a single clear verb — `execute`'s affected count, the
+write-vs-return overload of `count`, and the per-row *net* write count on streams
+(`record_count - reject_count`) — are deferred to a future major version.
+
 ### Condition Formats
 
 1. **Simple**: `{"column": value}`
