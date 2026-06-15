@@ -1813,11 +1813,10 @@ exception (per-row / aggregate `status`).
 
 Alongside the historical count keys, operations also expose the standard
 data-engineering `rows_*` names, so result counts read uniformly across a
-pipeline. **Additive and non-breaking** — the old keys stay (`count` is *not*
-deprecated); the alias is added only when its source key is present:
+pipeline. The alias is added only when its source key is present:
 
-| Method(s) | Old key | `rows_*` alias |
-|-----------|---------|----------------|
+| Method(s) | Old key (deprecated) | `rows_*` alias |
+|-----------|----------------------|----------------|
 | `query` / `select` | `count` | `rows_read` |
 | `insert` | `count` | `rows_inserted` |
 | `update` / `bulk_update` | `count` | `rows_updated` |
@@ -1825,15 +1824,20 @@ deprecated); the alias is added only when its source key is present:
 | `merge` / `merge_select` | `count` | `rows_merged` |
 | `stream_insert` / `stream_merge` | `record_count` / `reject_count` | `rows_read` / `rows_rejected` |
 
+**Migration nudge (non-breaking).** The old keys above still work, but reading one
+now emits a `DeprecationWarning` pointing to its `rows_*` replacement — switch to
+the `rows_*` names; the old keys will be unified away in a future release. Reads of
+the new keys are silent.
+
 ```python
 r = db.insert("orders", row)
-r["count"]          # 1  (still works)
-r["rows_inserted"]  # 1  (same value, standard name)
+r["rows_inserted"]  # 1  -- preferred
+r["count"]          # 1  -- still works, but emits a DeprecationWarning
 ```
 
-Generic cases without a single clear verb — `execute`'s affected count, the
-write-vs-return overload of `count`, and the per-row *net* write count on streams
-(`record_count - reject_count`) — are deferred to a future major version.
+Not yet aliased and therefore **not** deprecated: `execute`'s affected count, the
+file ops' `row_count`, and the per-row *net* write count on streams
+(`record_count - reject_count`) — deferred until their `rows_*` names land.
 
 ### Condition Formats
 

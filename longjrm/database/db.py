@@ -13,6 +13,7 @@ import datetime
 import functools
 import logging
 import traceback
+import warnings
 from abc import ABC, abstractmethod
 from longjrm.config.runtime import get_config
 from longjrm.database.placeholder_handler import PlaceholderHandler
@@ -21,6 +22,38 @@ from longjrm.utils import sql as sql_utils, data as data_utils
 
 
 logger = logging.getLogger(__name__)
+
+
+class _ResultDict(dict):
+    """A result dict that nudges callers off the deprecated count keys.
+
+    Reading a deprecated old key (``count`` / ``record_count`` / ``reject_count``
+    for the methods that now alias it) emits a ``DeprecationWarning`` pointing to its
+    ``rows_*`` replacement. The old key STILL WORKS -- this is only the migration
+    hint before the old vocabulary is unified away in a future release. Reads of the
+    new ``rows_*`` keys (and any other key) are silent.
+    """
+    __slots__ = ("_aliases",)
+
+    def __init__(self, data, aliases):
+        super().__init__(data)
+        self._aliases = aliases                  # deprecated old_key -> rows_* key
+
+    def _nudge(self, key):
+        new = self._aliases.get(key)
+        if new is not None:
+            warnings.warn(
+                f"longjrm result key '{key}' is deprecated; use '{new}'. The old key "
+                f"still works but will be removed in a future release.",
+                DeprecationWarning, stacklevel=3)
+
+    def __getitem__(self, key):
+        self._nudge(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self._nudge(key)
+        return super().get(key, default)
 
 
 def rows_alias(**mapping):
@@ -33,11 +66,12 @@ def rows_alias(**mapping):
     callers can read the standard names (``rows_read``, ``rows_inserted``,
     ``rows_updated``, ``rows_deleted``, ``rows_merged``, ``rows_rejected``, ...).
 
-    Non-breaking and opt-in by design: the old keys remain, so existing callers are
-    untouched -- in particular ``count`` is intentionally NOT deprecated. Generic
-    cases without a single clear verb (``execute``'s affected count; the
-    write-vs-return overload of ``count``; per-row net writes on streams) are left
-    for a future major version.
+    The old keys remain fully functional, but reading one now emits a
+    ``DeprecationWarning`` toward its ``rows_*`` replacement (see ``_ResultDict``) --
+    the migration nudge so the old vocabulary can be unified away in a release or
+    two. Cases without a single clear verb (``execute``'s affected count; the file
+    ops' ``row_count``) are left unaliased -- and therefore NOT yet deprecated --
+    until their ``rows_*`` names land.
     """
     def decorator(fn):
         @functools.wraps(fn)
@@ -45,8 +79,12 @@ def rows_alias(**mapping):
             result = fn(*args, **kwargs)
             if isinstance(result, dict):
                 for old, new in mapping.items():
+                    # dict.__getitem__ bypasses the deprecation nudge: a method whose
+                    # result is itself an already-wrapped _ResultDict (e.g. insert
+                    # returning query's result) must copy the old key silently here.
                     if old in result and new not in result:
-                        result[new] = result[old]
+                        result[new] = dict.__getitem__(result, old)
+                result = _ResultDict(result, dict(mapping))
             return result
         return wrapper
     return decorator

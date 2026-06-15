@@ -4,6 +4,10 @@ The aliasing is additive and non-breaking: old keys (count / record_count /
 reject_count / row_count) stay; the standard rows_* names are exposed alongside.
 """
 
+import warnings
+
+import pytest
+
 from longjrm.database.db import Db, rows_alias
 
 
@@ -43,6 +47,28 @@ def test_alias_passes_through_non_dict():
     def f():
         return None
     assert f() is None
+
+
+def test_deprecated_old_key_read_warns_toward_new():
+    @rows_alias(count="rows_inserted")
+    def f():
+        return {"status": 0, "count": 3}
+    r = f()
+    with pytest.warns(DeprecationWarning, match="rows_inserted"):
+        assert r["count"] == 3                  # old key still works, but warns
+    with pytest.warns(DeprecationWarning, match="rows_inserted"):
+        assert r.get("count") == 3
+
+
+def test_new_key_read_is_silent():
+    @rows_alias(record_count="rows_read", reject_count="rows_rejected")
+    def f():
+        return {"record_count": 9, "reject_count": 1}
+    r = f()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")          # any warning here would raise
+        assert r["rows_read"] == 9 and r.get("rows_rejected") == 1
+        assert r.get("status", 0) == 0          # unrelated keys silent too
 
 
 def test_public_methods_are_decorated():
