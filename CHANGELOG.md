@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This fixes a latent atomicity bug — inside `pool.transaction()`, a swallowed error let the context manager commit partial work instead of rolling back (rollback only fires when an exception propagates). **Preserved as result statuses (not raises):** DB2 `ADMIN_CMD` LOAD/EXPORT outcomes (`ROWS_LOADED`/`ROWS_REJECTED`/`ROWS_DELETED` reporting), Spark's `_check_delta_support()` capability guards, and the **streaming** methods (`stream_*`, `stream_to_csv`) with their per-row / aggregate `status` + `max_error_count` / `abort_on_error` semantics. Applications that need to continue past an error should wrap the call (see docs/database.md → "The Error Contract"). Callers that checked `result['status'] == -1` must switch to `try/except`.
 - **`bulk_update` misuse now raises `ValueError`** (BREAKING, minor): passing rows whose data is missing the declared `key_columns` previously returned `{"status": -1}`; it now raises `ValueError`, consistent with how `merge`/`select` already report invalid arguments. (Operational DB errors raise the driver exception; argument/misuse errors raise `ValueError`/`TypeError`.)
 
+### Added
+
+- **Data-engineering `rows_*` count keys (additive, non-breaking)**: result dicts now expose the standard `rows_*` names alongside the historical count keys, so counts read uniformly across a pipeline — `rows_read` (`query`/`select`, stream pull = `record_count`), `rows_inserted`/`rows_updated`/`rows_deleted`/`rows_merged` (the matching write methods, from `count`), and `rows_rejected` (streams, from `reject_count`). `SparkDb` gets the same on its overrides; async delegates and inherits for free. Each alias is added only when its source key is present.
+
+### Deprecated
+
+- **Old count keys now nudge toward `rows_*`**: reading `count` (`query`/`insert`/`update`/`delete`/`merge`) or `record_count`/`reject_count` (streams) emits a `DeprecationWarning` pointing to its `rows_*` replacement. The old keys still work and reads of the new keys are silent — this is only the migration hint. Planned unification path:
+  - **this release**: `rows_*` available + old keys deprecated (warn-on-access);
+  - **next**: add `rows_affected` / `rows_returned` (for `execute` and the file ops, whose `count`/`row_count` are not yet aliased and therefore not yet deprecated), and deprecate the remaining old keys;
+  - **then**: remove the old keys — unification complete.
+
 ## [0.3.0] - 2026-06-11
 
 ### Fixed
