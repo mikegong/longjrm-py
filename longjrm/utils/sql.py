@@ -12,11 +12,60 @@ logger = logging.getLogger(__name__)
 
 # SQL CURRENT keywords that need special handling
 CURRENT_KEYWORDS = [
-    '`CURRENT DATE`', 
-    '`CURRENT_DATE`', 
-    '`CURRENT TIMESTAMP`', 
+    '`CURRENT DATE`',
+    '`CURRENT_DATE`',
+    '`CURRENT TIMESTAMP`',
     '`CURRENT_TIMESTAMP`'
 ]
+
+
+class Raw:
+    """
+    Marks a string as a trusted SQL expression rather than data.
+
+    Values wrapped in ``Raw`` are rendered into the generated SQL verbatim at
+    construction time — no placeholder is emitted and nothing is bound::
+
+        db.insert("events", {"name": "boot", "created_at": Raw("CURRENT_TIMESTAMP")})
+        db.update("users", {"updated_at": CURRENT_TIMESTAMP}, {"id": 1})
+        db.select("logs", where={"ts": {">": Raw("CURRENT_DATE - 7")}})
+
+    Security: ``Raw`` instances can only be constructed from Python code —
+    data deserialized from JSON can never produce one, so untrusted input
+    cannot escalate to SQL. Never wrap untrusted strings in ``Raw``.
+
+    The legacy backtick form (``"`CURRENT TIMESTAMP`"`` as a plain string) is
+    still recognized for backward compatibility, but ``Raw`` is the
+    recommended mechanism: it is type-safe, works for any SQL expression (not
+    just the four CURRENT keywords), and avoids post-hoc placeholder rewriting.
+
+    Note: the expression text must not contain bind placeholders
+    (``%s``, ``?``, ``:name``).
+    """
+    __slots__ = ("text",)
+
+    def __init__(self, text):
+        if isinstance(text, Raw):
+            text = text.text
+        if not isinstance(text, str) or not text.strip():
+            raise TypeError(f"Raw expects a non-empty SQL string, got {text!r}")
+        self.text = text
+
+    def __repr__(self):
+        return f"Raw({self.text!r})"
+
+    def __eq__(self, other):
+        return isinstance(other, Raw) and other.text == self.text
+
+    def __hash__(self):
+        return hash(("longjrm.Raw", self.text))
+
+
+# Ready-made expressions for the common cases. Both spellings are standard
+# SQL and accepted by every supported backend (DB2 also accepts the
+# underscore forms).
+CURRENT_TIMESTAMP = Raw("CURRENT_TIMESTAMP")
+CURRENT_DATE = Raw("CURRENT_DATE")
 
 
 def check_current_keyword(string):
@@ -59,29 +108,33 @@ def unescape_current_keyword(string):
 
 def inject_current(sql, values, placeholder):
     """
-    Handle CURRENT SQL keywords in parameterized queries.
-    
-    For queries with placeholders (like %s or ?) where values contain CURRENT
-    keywords, replace the placeholder with the actual CURRENT keyword.
-    
+    Handle SQL expression values (Raw) and CURRENT keywords in parameterized queries.
+
+    For queries with placeholders (like %s or ?) where values contain Raw
+    expressions or backtick-escaped CURRENT keywords, replace the placeholder
+    with the expression / keyword text and drop the value from the bind list.
+
     Args:
         sql: SQL string with placeholders
         values: List of values for placeholders
         placeholder: Placeholder string ('%s', '?', etc.)
-        
+
     Returns:
         Tuple of (modified_sql, filtered_values)
     """
     if not values:
         return unescape_current_keyword(sql), values
-        
+
     logger.debug(f"inject_current: processing {len(values)} values with placeholder '{placeholder}'")
-    
+
     new_values = []
     placeholder_position = 1  # Track which placeholder we're working on (1-based)
-    
+
     for i in range(len(values)):
-        if isinstance(values[i], str) and check_current_keyword(values[i]):
+        if isinstance(values[i], Raw):
+            logger.debug(f"Found Raw expression: {values[i]!r}, replacing placeholder #{placeholder_position}")
+            sql = replace_nth(sql, placeholder, values[i].text, placeholder_position)
+        elif isinstance(values[i], str) and check_current_keyword(values[i]):
             logger.debug(f"Found CURRENT keyword: '{values[i]}', replacing placeholder #{placeholder_position}")
             # Replace placeholder with CURRENT keyword
             sql = replace_nth(sql, placeholder, values[i], placeholder_position)
@@ -89,60 +142,145 @@ def inject_current(sql, values, placeholder):
             # Keep this value and increment placeholder position
             new_values.append(values[i])
             placeholder_position += 1
-    
+
     return unescape_current_keyword(sql), new_values
 
 
-def conditions_to_string(conditions):
+def build_where(conditions, placeholder="?", inline=False):
     """
-    Convert conditions dictionary to WHERE clause string.
-    
-    Args:
-        conditions: Dictionary of column-value conditions
-        
-    Returns:
-        WHERE clause string (including " WHERE " prefix if conditions exist)
+    Build a WHERE clause from flexible conditions, returning (clause, values).
+
+    Shared entry point for callers -- such as merge_select() -- that need a
+    filter expressed the same way as select()/query(). Accepts several shapes:
+
+      - None / empty            -> ("", []) (no filtering)
+      - str                     -> (str, []) returned verbatim (assumed to already
+                                   begin with WHERE); lets callers pass a hand-built
+                                   clause for full control / backward compatibility
+      - dict                    -> standard longjrm where mapping; supports
+                                   operator conditions ({col: {">": x, "<=": y}}),
+                                   IN lists, and logical $and/$or/$not operators
+      - list of condition dicts -> implicitly AND-ed together, e.g.
+                                   [{col: {">": x}}, {col: {"<=": y}}]
+
+    When ``inline`` is False (default), value-bearing conditions emit placeholders
+    and their bound values are returned in the second element, so the caller can
+    pass them to execute()/query() and avoid inlining untrusted values. When
+    ``inline`` is True, values are inlined (quoted/escaped) and the returned list
+    is empty. Backtick-escaped CURRENT keywords are always emitted as SQL keywords
+    (never bound). Returns the clause with a leading space and an uppercase WHERE.
     """
     if not conditions:
-        return ""
-    
-    where_parts = []
-    for col, val in conditions.items():
-        if val is None:
-            where_parts.append(f"{col} IS NULL")
-        elif isinstance(val, str):
-            # Escape single quotes in string values
-            escaped_val = val.replace("'", "''")
-            where_parts.append(f"{col} = '{escaped_val}'")
-        elif isinstance(val, bool):
-            where_parts.append(f"{col} = {str(val).upper()}")
-        elif isinstance(val, (int, float)):
-            where_parts.append(f"{col} = {val}")
-        elif isinstance(val, dict):
-            # Handle operator conditions like {">=": 10}
-            for op, v in val.items():
-                if isinstance(v, str):
-                    escaped_v = v.replace("'", "''")
-                    where_parts.append(f"{col} {op} '{escaped_v}'")
-                else:
-                    where_parts.append(f"{col} {op} {v}")
+        return "", []
+    # A pre-built clause string is used as-is (caller owns quoting/escaping).
+    if isinstance(conditions, str):
+        return conditions, []
+    # A bare list of condition dicts is treated as an implicit AND so callers can
+    # express repeated-column ranges (col > a AND col <= b) without colliding on
+    # a single dict key.
+    where = {"$and": conditions} if isinstance(conditions, list) else conditions
+    clause, values = where_parser(where, placeholder, inline=inline)
+    if not clause:
+        return "", []
+    # where_parser emits a lowercase ' where ' prefix; normalize the keyword.
+    return clause.replace(" where ", " WHERE ", 1), (values or [])
+
+
+def build_inline_where(conditions):
+    """
+    Build an inline (no bind parameters) WHERE clause from flexible conditions.
+
+    Thin wrapper around build_where(inline=True) for callers that inline the
+    filter directly into a SQL string. Accepts the same str/dict/list shapes;
+    returns just the clause (a leading-space, uppercase ``WHERE ...``), or "".
+    """
+    clause, _ = build_where(conditions, "?", inline=True)
+    return clause
+
+
+# =============================================================================
+# WHERE Clause Parser Functions
+# =============================================================================
+# These functions parse JSON-style where conditions into SQL WHERE clauses.
+# Moved from Db class to enable reuse across the codebase.
+
+# Operators that mean equality / inequality against NULL. SQL requires the
+# `IS [NOT] NULL` form here — `col = NULL` / `col != NULL` always evaluate to
+# UNKNOWN (never true), so a plain comparison silently matches no rows.
+_NULL_IS_OPS = {'=', '==', 'IS'}
+_NULL_IS_NOT_OPS = {'!=', '<>', 'IS NOT', 'NOT'}
+
+
+def null_operator_clause(column, operator):
+    """
+    Translate ``operator`` applied to a ``None`` value into an ``IS NULL`` /
+    ``IS NOT NULL`` predicate.
+
+    Raises ValueError for operators that are undefined against NULL (``>``,
+    ``<``, ``LIKE``, ...) — silently matching nothing would hide the mistake.
+    """
+    op = ' '.join(str(operator).split()).upper()  # normalize internal whitespace
+    if op in _NULL_IS_OPS:
+        return f"{column} IS NULL"
+    if op in _NULL_IS_NOT_OPS:
+        return f"{column} IS NOT NULL"
+    raise ValueError(
+        f"Operator {operator!r} cannot be used with a None value. "
+        f"Use {{{column!r}: None}} (or {{'=': None}}) for IS NULL, "
+        f"or {{'!=': None}} for IS NOT NULL."
+    )
+
+
+def in_clause(column, operator, values, placeholder, inline, param_index):
+    """
+    Build an ``IN`` / ``NOT IN`` predicate, correctly handling ``None`` members
+    and empty lists.
+
+    SQL ``IN``/``NOT IN`` can't match NULL via the value list, and a NULL inside
+    a ``NOT IN`` list makes the whole predicate UNKNOWN for every row (the
+    classic NOT-IN-NULL trap). So a ``None`` member is pulled out and expressed
+    as a separate ``IS [NOT] NULL`` branch:
+
+        col IN (a, b)  + None  ->  (col IN (a, b) OR col IS NULL)
+        col NOT IN (a) + None  ->  (col NOT IN (a) AND col IS NOT NULL)
+
+    Returns ``(clause, bind_values, param_index)``.
+    """
+    is_not = 'NOT' in str(operator).upper()
+    has_null = any(v is None for v in values)
+    items = [v for v in values if v is not None]
+    binds = []
+
+    if not items:
+        # No non-null members.
+        if has_null:
+            clause = f"{column} IS NOT NULL" if is_not else f"{column} IS NULL"
         else:
-            where_parts.append(f"{col} = '{val}'")
-    
-    return " WHERE " + " AND ".join(where_parts)
+            # Empty list: NOT IN () is always true, IN () always false.
+            clause = "1=1" if is_not else "1=0"
+        return clause, binds, param_index
 
+    if inline:
+        item_strs = []
+        for it in items:
+            if isinstance(it, str):
+                item_strs.append("'" + it.replace("'", "''") + "'")
+            else:
+                item_strs.append(str(it))
+        inner = ', '.join(item_strs)
+    else:
+        inner = ', '.join([placeholder] * len(items))
+        binds = list(items)
+        param_index += len(items)
 
-# =============================================================================
-# WHERE Clause Parser Functions
-# =============================================================================
-# These functions parse JSON-style where conditions into SQL WHERE clauses.
-# Moved from Db class to enable reuse across the codebase.
+    clause = f"{column} {operator} ({inner})"
+    if has_null:
+        if is_not:
+            clause = f"({clause} AND {column} IS NOT NULL)"
+        else:
+            clause = f"({clause} OR {column} IS NULL)"
+    return clause, binds, param_index
 
-# =============================================================================
-# WHERE Clause Parser Functions
-# =============================================================================
-# These functions parse JSON-style where conditions into SQL WHERE clauses.
-# Moved from Db class to enable reuse across the codebase.
 
 def simple_condition_parser(condition, param_index, placeholder, inline=False):
     """
@@ -162,7 +300,10 @@ def simple_condition_parser(condition, param_index, placeholder, inline=False):
     arr_cond = []
     arr_values = []
 
-    if value is None:
+    if isinstance(value, Raw):
+        # Trusted SQL expression: rendered verbatim, never bound.
+        arr_cond.append(f"{column} = {value.text}")
+    elif value is None:
         arr_cond.append(f"{column} is null")
     elif isinstance(value, str):
         clean_value = value.replace("''", "'")
@@ -205,7 +346,14 @@ def regular_condition_parser(condition, param_index, placeholder, inline=False):
     arr_values = []
 
     for operator, value in cond_obj.items():
-        if isinstance(value, str):
+        if isinstance(value, Raw):
+            # Trusted SQL expression: rendered verbatim, never bound.
+            arr_cond.append(f"{column} {operator} {value.text}")
+        elif value is None:
+            # `col = NULL` / `col != NULL` is never true in SQL; translate to
+            # IS [NOT] NULL (raises for operators undefined against NULL).
+            arr_cond.append(null_operator_clause(column, operator))
+        elif isinstance(value, str):
             clean_value = value.replace("''", "'")
             if check_current_keyword(clean_value):
                 arr_cond.append(f"{column} {operator} {unescape_current_keyword(clean_value)}")
@@ -216,26 +364,12 @@ def regular_condition_parser(condition, param_index, placeholder, inline=False):
                 param_index += 1
                 arr_values.append(clean_value)
                 arr_cond.append(f"{column} {operator} {placeholder}")
-        elif isinstance(value, list) and operator.upper() == 'IN':
-            # Special handling for IN operator with list values
-            if inline:
-                if not value: # empty list
-                     arr_cond.append("1=0") # false condition
-                else:
-                    item_strs = []
-                    for list_item in value:
-                        if isinstance(list_item, str):
-                             escaped_item = list_item.replace("'", "''")
-                             item_strs.append(f"'{escaped_item}'")
-                        else:
-                             item_strs.append(str(list_item))
-                    arr_cond.append(f"{column} {operator} ({', '.join(item_strs)})")
-            else:
-                placeholders = ', '.join([placeholder] * len(value))
-                arr_cond.append(f"{column} {operator} ({placeholders})")
-                for list_item in value:
-                    param_index += 1
-                    arr_values.append(list_item)
+        elif isinstance(value, list) and ' '.join(operator.upper().split()) in ('IN', 'NOT IN'):
+            # IN / NOT IN. Handles empty lists and None members (see in_clause).
+            clause, binds, param_index = in_clause(
+                column, operator, value, placeholder, inline, param_index)
+            arr_cond.append(clause)
+            arr_values.extend(binds)
         elif inline:
              arr_cond.append(f"{column} {operator} {value}")
         else:
@@ -265,13 +399,27 @@ def comprehensive_condition_parser(condition, param_index, placeholder, inline=F
     value = cond_obj['value']
     arr_cond = []
     arr_values = []
-    
+
     # Local placeholder override takes precedence over global inline
     # If placeholder='N', use inline. If placeholder='Y', use placeholder.
     # If placeholder not set, default 'Y' -> check inline arg.
     should_inline = cond_obj.get('placeholder', 'N' if inline else 'Y') == 'N'
 
-    if isinstance(value, str):
+    if isinstance(value, Raw):
+        # Trusted SQL expression: rendered verbatim, never bound.
+        arr_cond.append(f"{column} {operator} {value.text}")
+    elif value is None:
+        # `col = NULL` / `col != NULL` is never true in SQL; translate to
+        # IS [NOT] NULL (raises for operators undefined against NULL).
+        arr_cond.append(null_operator_clause(column, operator))
+    elif isinstance(value, list) and ' '.join(str(operator).upper().split()) in ('IN', 'NOT IN'):
+        # IN / NOT IN. Handles empty lists and None members (see in_clause).
+        # should_inline honors the per-condition placeholder override.
+        clause, binds, param_index = in_clause(
+            column, operator, value, placeholder, should_inline, param_index)
+        arr_cond.append(clause)
+        arr_values.extend(binds)
+    elif isinstance(value, str):
         clean_value = value.replace("''", "'")
         if check_current_keyword(clean_value):
             arr_cond.append(f"{column} {operator} {unescape_current_keyword(clean_value)}")
@@ -375,32 +523,33 @@ def operator_condition_parser(condition, param_index, placeholder, inline=False)
         if sub_conditions:
             arr_cond.append('NOT (' + ' AND '.join(sub_conditions) + ')')
             
+    elif op_upper == '$IN':
+        if not isinstance(operand, dict):
+            raise ValueError(f"$in operator expects {{column: [values]}}, got {type(operand)}")
+
+        for col, values in operand.items():
+            if not isinstance(values, list):
+                raise ValueError(f"$in values must be a list, got {type(values)}")
+
+            # Handles empty lists and None members (see in_clause).
+            clause, binds, param_index = in_clause(
+                col, "IN", values, placeholder, inline, param_index)
+            arr_cond.append(clause)
+            arr_values.extend(binds)
+
     elif op_upper == '$NIN':
         if not isinstance(operand, dict):
             raise ValueError(f"$nin operator expects {{column: [values]}}, got {type(operand)}")
-        
+
         for col, values in operand.items():
             if not isinstance(values, list):
                 raise ValueError(f"$nin values must be a list, got {type(values)}")
-            
-            if inline:
-                if not values:
-                     arr_cond.append("1=1") # NOT IN empty set is always true? No, typically "col NOT IN ()" syntax isn't standard or empty set means true. 
-                     # Wait, col NOT IN (empty) is True. col IN (empty) is False.
-                item_strs = []
-                for v in values:
-                    if isinstance(v, str):
-                        escaped_v = v.replace("'", "''")
-                        item_strs.append(f"'{escaped_v}'")
-                    else:
-                        item_strs.append(str(v))
-                arr_cond.append(f"{col} NOT IN ({', '.join(item_strs)})")
-            else:
-                placeholders = ', '.join([placeholder] * len(values))
-                arr_cond.append(f"{col} NOT IN ({placeholders})")
-                for v in values:
-                    param_index += 1
-                    arr_values.append(v)
+
+            # Handles empty lists and None members (NOT-IN-NULL trap) — see in_clause.
+            clause, binds, param_index = in_clause(
+                col, "NOT IN", values, placeholder, inline, param_index)
+            arr_cond.append(clause)
+            arr_values.extend(binds)
     else:
         raise ValueError(f"Unknown operator: {operator}")
     
@@ -434,14 +583,12 @@ def where_parser(where, placeholder, inline=False):
             arr_cond, arr_values, param_index = operator_condition_parser(condition, param_index, placeholder, inline)
         elif not isinstance(where[column], dict):
             arr_cond, arr_values, param_index = simple_condition_parser(condition, param_index, placeholder, inline)
-        elif isinstance(where[column], dict):
+        else:
             keys = where[column].keys()
             if "operator" in keys and "value" in keys and "placeholder" in keys:
                 arr_cond, arr_values, param_index = comprehensive_condition_parser(condition, param_index, placeholder, inline)
             else:
                 arr_cond, arr_values, param_index = regular_condition_parser(condition, param_index, placeholder, inline)
-        else:
-            raise Exception('Invalid where condition')
         parsed_cond.extend(arr_cond)
         if arr_values is not None:
             parsed_values.extend(arr_values)

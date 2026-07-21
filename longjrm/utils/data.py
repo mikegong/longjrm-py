@@ -164,33 +164,40 @@ def escape_csv_row(values, null_value='', quotechar=None):
 # Database Data Transformation Functions
 # =============================================================================
 
-def datalist_to_dataseq(datalist, bulk_size=0, check_current_fn=None, unescape_current_fn=None):
+def datalist_to_dataseq(datalist, bulk_size=0, check_current_fn=None, unescape_current_fn=None,
+                        process_value_fn=None):
     """
     Transform a list of data rows into tuple of data sequences.
-    
+
     Converts list of dictionaries to tuples suitable for bulk database operations.
     Yields batches of tuples based on bulk_size through generator.
-    
+
     Args:
         datalist: List of dictionaries to transform
         bulk_size: Number of rows per batch (0 = all rows in single batch)
         check_current_fn: Function to check for CURRENT SQL keywords
         unescape_current_fn: Function to unescape CURRENT keywords
-        
+        process_value_fn: Optional per-value converter (e.g. Db._process_value).
+            When provided it replaces the built-in conversion below, so bulk
+            operations serialize values exactly like their single-row
+            counterparts on the same backend.
+
     Yields:
         Tuple of row tuples for each batch
     """
     import json
     import datetime
-    
+
     dataseq = []
 
     for i in range(len(datalist)):
         row_data = []
         for k in datalist[i].keys():
             value = datalist[i][k]
-            
-            if isinstance(value, dict):
+
+            if process_value_fn is not None:
+                data_value = process_value_fn(value)
+            elif isinstance(value, dict):
                 data_value = json.dumps(value, ensure_ascii=False)
             elif isinstance(value, list):
                 if len(value) > 0:

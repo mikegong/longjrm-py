@@ -1,7 +1,8 @@
 """
 JRM Stream Operations Test Suite
 
-Tests for stream_query and stream_insert functionality.
+Tests for stream_query, stream_select, stream_insert, stream_update and
+stream_merge functionality.
 
 To run this test, you have two options:
 
@@ -306,6 +307,92 @@ def test_stream_query_sql(db_key, backend=PoolBackend.DBUTILS):
     
     pools[db_key].dispose()
     print(f"SUCCESS: {db_key} stream_query connection closed")
+
+def test_stream_select_sql(db_key, backend=PoolBackend.DBUTILS):
+    """Test stream_select functionality for SQL databases (MySQL/PostgreSQL)"""
+    print(f"\n=== Testing {db_key} stream_select Operations with {backend.value} backend ===")
+
+    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+    configure(cfg)
+    db_cfg = cfg.require(db_key)
+
+    pools = {}
+    pools[db_key] = Pool.from_config(db_cfg, backend)
+
+    with pools[db_key].client() as client:
+        db = get_db(client)
+        print(f"Connected to {db.database_type} database: {db.database_name}")
+
+        # Set up test data
+        if not setup_test_data(db, db.database_type):
+            print("ERROR: Could not set up test data, aborting tests")
+            return
+
+        # Test 1: Basic streaming select - stream all rows (limit:0 = no cap)
+        print("\n--- Test 1: Basic Streaming Select (limit:0 streams all) ---")
+        rows_collected = []
+        row_numbers = []
+        for row_num, row, status in db.stream_select(
+                "test_stream_users",
+                columns=["id", "name", "email", "age", "department"],
+                options={"limit": 0, "order_by": ["id"]}):
+            if status == 0:
+                rows_collected.append(row)
+                row_numbers.append(row_num)
+        assert len(rows_collected) == 5, f"Should stream 5 rows, got {len(rows_collected)}"
+        assert row_numbers == [1, 2, 3, 4, 5], f"Row numbers should be sequential 1-5, got {row_numbers}"
+        assert all("id" in row for row in rows_collected), "All rows should have 'id' column"
+        assert all("name" in row for row in rows_collected), "All rows should have 'name' column"
+        print("SUCCESS: Basic streaming select passed")
+
+        # Test 2: Streaming select with a where filter
+        print("\n--- Test 2: Streaming Select with Filter ---")
+        engineering = []
+        for row_num, row, status in db.stream_select(
+                "test_stream_users", columns=["name", "department"],
+                where={"department": "Engineering"}, options={"limit": 0}):
+            if status == 0:
+                engineering.append(row)
+                assert row["department"] == "Engineering", "All rows should be Engineering"
+        assert len(engineering) == 3, f"Should have 3 Engineering rows, got {len(engineering)}"
+        print(f"SUCCESS: Filtered {len(engineering)} Engineering rows")
+
+        # Test 3: fetch limit is honored -- explicit limit caps, limit:0 streams all
+        print("\n--- Test 3: Fetch Limit Honored ---")
+        capped = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=["id"],
+            options={"limit": 2, "order_by": ["id"]}) if status == 0]
+        assert len(capped) == 2, f"limit:2 should cap the stream to 2 rows, got {len(capped)}"
+        uncapped = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=["id"], options={"limit": 0}) if status == 0]
+        assert len(uncapped) == 5, f"limit:0 should stream all 5 rows, got {len(uncapped)}"
+        print("SUCCESS: Fetch limit honored (cap=2, all=5)")
+
+        # Test 4: stream_select agrees with buffered select
+        print("\n--- Test 4: Compare stream_select vs select ---")
+        opts = {"limit": 0, "order_by": ["id"]}
+        cols = ["id", "name", "email"]
+        regular = db.select("test_stream_users", columns=cols, options=opts)["data"]
+        streamed = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=cols, options=opts) if status == 0]
+        assert len(streamed) == len(regular), "stream_select and select should return the same count"
+        for s, r in zip(streamed, regular):
+            assert s["id"] == r["id"], "id mismatch between stream_select and select"
+            assert s["name"] == r["name"], "name mismatch between stream_select and select"
+        print(f"SUCCESS: stream_select matches select ({len(streamed)} rows)")
+
+        # Test 5: Streaming select with no results
+        print("\n--- Test 5: Streaming Select with No Results ---")
+        empty = [row for _, row, status in db.stream_select(
+            "test_stream_users", columns=["id"],
+            where={"email": "nonexistent@test.com"}, options={"limit": 0}) if status == 0]
+        assert len(empty) == 0, "Should stream no rows for a non-existent email"
+        print("SUCCESS: No results streaming select passed")
+
+        cleanup_test_data(db)
+
+    pools[db_key].dispose()
+    print(f"SUCCESS: {db_key} stream_select connection closed")
 
 def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
     """Test stream_insert functionality for SQL databases (MySQL/PostgreSQL)"""
@@ -837,223 +924,6 @@ def test_stream_merge_sql(db_key, backend=PoolBackend.DBUTILS):
     pools[db_key].dispose()
     print(f"SUCCESS: {db_key} stream_merge connection closed")
 
-def test_merge_select_sql(db_key, backend=PoolBackend.DBUTILS):
-    """Test merge_select functionality for SQL databases (MySQL/PostgreSQL)"""
-    print(f"\n=== Testing {db_key} merge_select Operations with {backend.value} backend ===")
-    
-    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
-    configure(cfg)
-    db_cfg = cfg.require(db_key)
-    
-    pools = {}
-    pools[db_key] = Pool.from_config(db_cfg, backend)
-    
-    with pools[db_key].client() as client:
-        db = get_db(client)
-        print(f"Connected to {db.database_type} database: {db.database_name}")
-        
-        # Set up test tables
-        print("\n--- Setting up test data for merge_select ---")
-        try:
-            db.execute("DROP TABLE IF EXISTS merge_select_source")
-            db.execute("DROP TABLE IF EXISTS merge_select_target")
-            
-            if db.database_type in ['postgres', 'postgresql']:
-                db.execute("""
-                    CREATE TABLE merge_select_source (
-                        id SERIAL PRIMARY KEY,
-                        email VARCHAR(100) UNIQUE,
-                        name VARCHAR(100),
-                        status VARCHAR(20),
-                        age INTEGER
-                    )
-                """)
-                db.execute("""
-                    CREATE TABLE merge_select_target (
-                        id SERIAL PRIMARY KEY,
-                        email VARCHAR(100) UNIQUE,
-                        name VARCHAR(100),
-                        status VARCHAR(20) DEFAULT 'pending',
-                        age INTEGER
-                    )
-                """)
-            else:  # MySQL
-                db.execute("""
-                    CREATE TABLE merge_select_source (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        email VARCHAR(100) UNIQUE,
-                        name VARCHAR(100),
-                        status VARCHAR(20),
-                        age INTEGER
-                    )
-                """)
-                db.execute("""
-                    CREATE TABLE merge_select_target (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        email VARCHAR(100) UNIQUE,
-                        name VARCHAR(100),
-                        status VARCHAR(20) DEFAULT 'pending',
-                        age INTEGER
-                    )
-                """)
-            
-            # Insert source data
-            source_data = [
-                {"email": "alice@test.com", "name": "Alice Source", "status": "active", "age": 25},
-                {"email": "bob@test.com", "name": "Bob Source", "status": "active", "age": 30},
-                {"email": "charlie@test.com", "name": "Charlie Source", "status": "inactive", "age": 35},
-            ]
-            db.insert("merge_select_source", source_data)
-            
-            # Insert some initial target data (to test update behavior)
-            initial_target = [
-                {"email": "alice@test.com", "name": "Alice Old", "status": "pending", "age": 20},
-            ]
-            db.insert("merge_select_target", initial_target)
-            
-            print("SUCCESS: Test tables created with initial data")
-        except Exception as e:
-            print(f"ERROR: Could not set up merge_select test data: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-        
-        # Test 1: Basic merge_select - merge from source to target
-        print("\n--- Test 1: Basic merge_select ---")
-        
-        result = db.merge_select(
-            source_table="merge_select_source",
-            target_table="merge_select_target",
-            insert_columns=["email", "name", "status", "age"],
-            key_columns=["email"]
-        )
-        
-        print(f"merge_select result: {result}")
-        assert result["status"] == 0, f"merge_select should succeed: {result['message']}"
-        
-        # Verify results
-        verify_result = db.query("SELECT * FROM merge_select_target ORDER BY email")
-        assert len(verify_result["data"]) == 3, "Should have 3 total records"
-        
-        # Check that Alice was updated (not duplicated)
-        alice = next((r for r in verify_result["data"] if r["email"] == "alice@test.com"), None)
-        assert alice["name"] == "Alice Source", "Alice should be updated from source"
-        assert alice["age"] == 25, "Alice age should be updated"
-        
-        # Check new inserts
-        bob = next((r for r in verify_result["data"] if r["email"] == "bob@test.com"), None)
-        assert bob is not None, "Bob should be inserted"
-        
-        charlie = next((r for r in verify_result["data"] if r["email"] == "charlie@test.com"), None)
-        assert charlie is not None, "Charlie should be inserted"
-        
-        print("SUCCESS: Basic merge_select test passed")
-        
-        # Test 2: merge_select with conditions
-        print("\n--- Test 2: merge_select with Conditions ---")
-        
-        # Reset target table
-        db.execute("DELETE FROM merge_select_target")
-        
-        # Merge only active users
-        result = db.merge_select(
-            source_table="merge_select_source",
-            target_table="merge_select_target",
-            insert_columns=["email", "name", "status", "age"],
-            key_columns=["email"],
-            conditions={"status": "active"}
-        )
-        
-        print(f"Conditional merge_select result: {result}")
-        assert result["status"] == 0, "Conditional merge_select should succeed"
-        
-        # Verify only active users were merged
-        verify_result = db.query("SELECT * FROM merge_select_target")
-        assert len(verify_result["data"]) == 2, "Should have 2 active users"
-        print("SUCCESS: merge_select with conditions test passed")
-        
-        # Test 3: merge_select with custom source SELECT
-        print("\n--- Test 3: merge_select with Custom Source SELECT ---")
-        
-        # Reset target table
-        db.execute("DELETE FROM merge_select_target")
-        
-        custom_sql = "SELECT email, name, status, age FROM merge_select_source WHERE age >= 30 ORDER BY age DESC"
-        
-        result = db.merge_select(
-            source_table=None,
-            target_table="merge_select_target",
-            insert_columns=["email", "name", "status", "age"],
-            key_columns=["email"],
-            source_select=custom_sql
-        )
-        
-        print(f"Custom SELECT merge_select result: {result}")
-        assert result["status"] == 0, "Custom SELECT merge_select should succeed"
-        
-        # Verify only age >= 30 were merged
-        verify_result = db.query("SELECT * FROM merge_select_target")
-        assert len(verify_result["data"]) == 2, "Should have 2 users with age >= 30"
-        print("SUCCESS: merge_select with custom SELECT test passed")
-        
-        # Test 4: merge_select with order_by
-        print("\n--- Test 4: merge_select with ORDER BY ---")
-        
-        # This test just verifies the query runs successfully with order_by
-        db.execute("DELETE FROM merge_select_target")
-        
-        result = db.merge_select(
-            source_table="merge_select_source",
-            target_table="merge_select_target",
-            insert_columns=["email", "name", "status", "age"],
-            key_columns=["email"],
-            order_by="age DESC"
-        )
-        
-        print(f"ORDER BY merge_select result: {result}")
-        assert result["status"] == 0, "ORDER BY merge_select should succeed"
-        print("SUCCESS: merge_select with ORDER BY test passed")
-        
-        # Test 5: merge_select with custom update_columns
-        print("\n--- Test 5: merge_select with Custom Update Columns ---")
-        
-        # Reset and set up for update test
-        db.execute("DELETE FROM merge_select_target")
-        db.insert("merge_select_target", [{"email": "alice@test.com", "name": "Keep This Name", "status": "old_status", "age": 99}])
-        
-        result = db.merge_select(
-            source_table="merge_select_source",
-            target_table="merge_select_target",
-            insert_columns=["email", "name", "status", "age"],
-            key_columns=["email"],
-            update_columns=["status", "age"]  # Only update status and age, not name
-        )
-        
-        print(f"Custom update columns result: {result}")
-        assert result["status"] == 0, "Custom update columns merge_select should succeed"
-        
-        # Verify Alice's name was NOT updated (only status and age)
-        verify_result = db.query("SELECT * FROM merge_select_target WHERE email = %s", ["alice@test.com"])
-        alice = verify_result["data"][0]
-        assert alice["name"] == "Keep This Name", "Alice name should NOT be updated"
-        assert alice["status"] == "active", "Alice status SHOULD be updated"
-        assert alice["age"] == 25, "Alice age SHOULD be updated"
-        print("SUCCESS: merge_select with custom update_columns test passed")
-        
-        # Cleanup
-        try:
-            db.execute("DROP TABLE IF EXISTS merge_select_source")
-            db.execute("DROP TABLE IF EXISTS merge_select_target")
-            print("SUCCESS: Cleaned up merge_select test tables")
-        except:
-            pass
-    
-    pools[db_key].dispose()
-    print(f"SUCCESS: {db_key} merge_select connection closed")
-
-    pools[db_key].dispose()
-    print(f"SUCCESS: {db_key} merge_select connection closed")
-
 
 def test_error_handling():
     """Test error handling for stream operations"""
@@ -1210,22 +1080,22 @@ if __name__ == "__main__":
             traceback.print_exc()
             sys.exit(1)
     
-    # Test merge_select
+    # Test stream_select
     print("\n" + "="*60)
-    print("PART 5: Testing merge_select")
+    print("PART 5: Testing stream_select")
     print("="*60)
-    
+
     for db_key, backend in test_combinations:
         try:
             db_cfg = cfg.require(db_key)
-            print(f"\n>>> Running merge_select tests with {db_key} using {backend.value} backend")
-            test_merge_select_sql(db_key, backend)
-            print(f"SUCCESS: {db_key} ({backend.value}) merge_select tests completed")
+            print(f"\n>>> Running stream_select tests with {db_key} using {backend.value} backend")
+            test_stream_select_sql(db_key, backend)
+            print(f"SUCCESS: {db_key} ({backend.value}) stream_select tests completed")
             combinations_tested += 1
         except KeyError:
             print(f"WARNING: {db_key} configuration not found, skipping...")
         except Exception as e:
-            print(f"FAILED: {db_key} ({backend.value}) merge_select tests failed: {e}")
+            print(f"FAILED: {db_key} ({backend.value}) stream_select tests failed: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
@@ -1233,7 +1103,7 @@ if __name__ == "__main__":
     if combinations_tested == 0:
         print("ERROR: No database configurations found")
         sys.exit(1)
-    
+
     # Test error handling
     print("\n" + "="*60)
     print("PART 7: Testing Error Handling")

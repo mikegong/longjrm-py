@@ -9,7 +9,8 @@ Supports:
 import logging
 import json
 from datetime import datetime
-from longjrm.database.db import Db
+from longjrm.database.db import Db, rows_alias
+from longjrm.utils import sql as sql_utils
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,14 @@ class SparkDb(Db):
     Transaction methods (commit/rollback) are no-ops as Spark SQL
     doesn't support traditional transactions (use Delta Lake for ACID).
     """
-    
+
+    # merge_select(): Spark/Delta uses MERGE INTO ...; SET targets must be
+    # qualified, and the connector can't bind parameters here so conditions are
+    # always inlined.
+    _merge_select_style = 'merge_into'
+    _merge_select_set_target_prefix = 'target.'
+    _merge_select_supports_bind = False
+
     def __init__(self, client, use_parameterized=None):
         super().__init__(client)
         self.spark = client['conn']  # SparkSession
@@ -105,6 +113,9 @@ class SparkDb(Db):
         
         def format_value(val):
             """Format a Python value for SQL literal embedding."""
+            if isinstance(val, sql_utils.Raw):
+                # Trusted SQL expression: rendered verbatim.
+                return val.text
             if val is None:
                 return "NULL"
             elif isinstance(val, bool):
@@ -129,6 +140,7 @@ class SparkDb(Db):
         
         return result_sql, None
     
+    @rows_alias(count="rows_read")
     def query(self, sql, arr_values=None):
         """
         Execute query and return results.
@@ -160,13 +172,7 @@ class SparkDb(Db):
             
         except Exception as e:
             logger.error(f"Spark query failed: {e}", exc_info=True)
-            return {
-                "status": -1,
-                "message": f"Query failed: {e}",
-                "data": [],
-                "columns": [],
-                "count": 0
-            }
+            raise
     
     def stream_query(self, sql, arr_values=None, *, max_error_count=0):
         """
@@ -215,12 +221,7 @@ class SparkDb(Db):
             
         except Exception as e:
             logger.error(f"Spark execute failed: {e}", exc_info=True)
-            return {
-                "status": -1,
-                "message": f"Execute failed: {e}",
-                "data": [],
-                "count": 0
-            }
+            raise
     
     def _single_insert(self, table, data, return_columns=None):
         """
@@ -236,7 +237,10 @@ class SparkDb(Db):
         column_list = ", ".join(columns)
         
         try:
-            if self.use_parameterized:
+            # Raw expressions can't be bound as named parameters; fall back to
+            # the inline path (format_value renders them verbatim).
+            has_raw = any(isinstance(v, sql_utils.Raw) for v in data.values())
+            if self.use_parameterized and not has_raw:
                 # Spark 3.4+: Use native parameterized queries
                 placeholders = ", ".join([f":{col}" for col in columns])
                 sql = f"INSERT INTO {table} ({column_list}) VALUES ({placeholders})"
@@ -253,9 +257,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": 1}
             
         except Exception as e:
-            message = f"Spark insert failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark insert failed: {e}", exc_info=True)
+            raise
     
     def _bulk_insert(self, table, data_list, return_columns=None, bulk_size=1000):
         """
@@ -291,9 +294,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_inserted}
             
         except Exception as e:
-            message = f"Spark bulk insert failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark bulk insert failed: {e}", exc_info=True)
+            raise
     
     def update(self, table, data, where=None):
         """
@@ -301,23 +303,30 @@ class SparkDb(Db):
         Requires Delta Lake for UPDATE support.
         """
         if not self._check_delta_support():
-            return {
-                "status": -1,
-                "message": "UPDATE requires Delta Lake. Install delta-spark package.",
-                "data": [], "count": 0
-            }
-        
+            # Error contract: raise rather than return status -1 — an unchecked
+            # sentinel inside pool.transaction() would commit partial work.
+            raise RuntimeError("UPDATE requires Delta Lake. Install delta-spark package.")
+
         try:
             from delta.tables import DeltaTable
-            
+
             delta_table = DeltaTable.forName(self.spark, table)
-            
+
             # Build condition string
             condition = self._build_condition_string(where) if where else "1=1"
-            
-            # Build update dict
-            update_dict = {k: f"'{v}'" if isinstance(v, str) else str(v) 
-                          for k, v in data.items()}
+
+            # Build update dict (escape quotes in strings, same as conditions)
+            update_dict = {}
+            for k, v in data.items():
+                if v is None:
+                    update_dict[k] = "NULL"
+                elif isinstance(v, sql_utils.Raw):
+                    update_dict[k] = v.text
+                elif isinstance(v, str):
+                    escaped = v.replace("'", "''")
+                    update_dict[k] = f"'{escaped}'"
+                else:
+                    update_dict[k] = str(v)
             
             delta_table.update(condition=condition, set=update_dict)
             
@@ -326,9 +335,8 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": -1}
             
         except Exception as e:
-            message = f"Spark update failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark update failed: {e}", exc_info=True)
+            raise
     
     def delete(self, table, where=None):
         """
@@ -336,11 +344,8 @@ class SparkDb(Db):
         Requires Delta Lake for DELETE support.
         """
         if not self._check_delta_support():
-            return {
-                "status": -1,
-                "message": "DELETE requires Delta Lake. Install delta-spark package.",
-                "data": [], "count": 0
-            }
+            # Error contract: raise rather than return status -1.
+            raise RuntimeError("DELETE requires Delta Lake. Install delta-spark package.")
         
         try:
             from delta.tables import DeltaTable
@@ -360,23 +365,25 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": -1}
             
         except Exception as e:
-            message = f"Spark delete failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark delete failed: {e}", exc_info=True)
+            raise
     
-    def merge(self, table, data, key_columns, column_meta=None, update_columns=None, 
-              no_update='N', bulk_size=0):
+    @rows_alias(count="rows_merged")
+    def merge(self, table, data, key_columns, no_update=None, *, update_columns=None):
         """
         Merge (upsert) data into Delta Lake table using pure SQL.
         Uses MERGE INTO ... USING (VALUES ...) syntax to avoid Python serialization.
+
+        Mirrors the base ``merge(table, data, key_columns, no_update)``
+        signature (async delegation passes ``no_update`` positionally);
+        ``update_columns`` is keyword-only.
         """
         if not self._check_delta_support():
-            return {
-                "status": -1,
-                "message": "MERGE requires Delta Lake. Install delta-spark package.",
-                "data": [], "count": 0
-            }
-        
+            # Error contract: raise rather than return status -1.
+            raise RuntimeError("MERGE requires Delta Lake. Install delta-spark package.")
+
+        no_update = self._no_update_flag(no_update)
+
         if not data:
             return {"status": 0, "message": "No data to merge", "data": [], "count": 0}
         
@@ -409,7 +416,7 @@ class SparkDb(Db):
             merge_condition = " AND ".join([f"target.{k} = source.{k}" for k in key_columns])
             
             # Build UPDATE SET clause
-            if no_update != 'Y' and update_columns:
+            if not no_update and update_columns:
                 update_set = ", ".join([f"target.{col} = source.{col}" for col in update_columns])
                 update_clause = f"WHEN MATCHED THEN UPDATE SET {update_set}"
             else:
@@ -440,10 +447,19 @@ class SparkDb(Db):
             return {"status": 0, "message": message, "data": [], "count": count}
             
         except Exception as e:
-            message = f"Spark merge failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark merge failed: {e}", exc_info=True)
+            raise
     
+    def bulk_update(self, table, data_list, key_columns, bulk_size=1000):
+        """
+        Not supported: the inherited implementation binds parameters through a
+        DB-API cursor (executemany), which Spark has no equivalent for.
+        Use merge() on a Delta table instead.
+        """
+        raise NotImplementedError(
+            "SparkDb does not support bulk_update(). Use merge() on a Delta table instead."
+        )
+
     def _build_condition_string(self, where):
         """Build SQL condition string from where dict."""
         if not where:
@@ -453,10 +469,14 @@ class SparkDb(Db):
         for k, v in where.items():
             if v is None:
                 conditions.append(f"{k} IS NULL")
+            elif isinstance(v, sql_utils.Raw):
+                conditions.append(f"{k} = {v.text}")
             elif isinstance(v, dict):
                 # Handle operators: {'LIKE': '%val%'}, {'>': 10}, etc.
                 for op, val in v.items():
-                    if isinstance(val, str):
+                    if isinstance(val, sql_utils.Raw):
+                        conditions.append(f"{k} {op} {val.text}")
+                    elif isinstance(val, str):
                         escaped = val.replace("'", "''")
                         conditions.append(f"{k} {op} '{escaped}'")
                     else:
@@ -613,9 +633,8 @@ class SparkDb(Db):
                 raise ValueError(f"Unknown source_type: {source_type}. Use 'file' or 'cursor'.")
                 
         except Exception as e:
-            message = f"Spark bulk_load failed: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message, "data": [], "count": 0}
+            logger.error(f"Spark bulk_load failed: {e}", exc_info=True)
+            raise
 
 
 class _SparkCursor:
@@ -638,7 +657,14 @@ class _SparkCursor:
         return self._description
     
     def execute(self, sql, params=None):
-        """Execute SQL statement."""
+        """Execute SQL statement. Bound parameters are not supported."""
+        if params:
+            # SparkDb inlines values via _prepare_sql before SQL reaches the
+            # cursor; refusing here prevents silently dropping bound values.
+            raise NotImplementedError(
+                "_SparkCursor does not support bound parameters; "
+                "values must be inlined into the SQL (see SparkDb._prepare_sql)."
+            )
         self._df = self.spark.sql(sql)
         if self._df.schema:
             self._description = [(field.name, None, None, None, None, None, None) 

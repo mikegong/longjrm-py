@@ -24,6 +24,53 @@ registry is [longjrm/connection/driver_map.json](longjrm/connection/driver_map.j
 add a new entry there, then implement a `Db` subclass (see "ABC trap"
 below) and register it in [longjrm/database/__init__.py](longjrm/database/__init__.py).
 
+## Error contract (invariant)
+
+LongJRM is a generic DB library, so it follows DB-API/EAFP: data methods
+**return a result dict on success (`status: 0`) and raise on failure.** Do
+not add methods that swallow operational errors into a `{"status": -1}`
+return — a sentinel an unchecked caller reads as success is the bug
+exceptions prevent, and it silently breaks transactions:
+`pool.transaction()` rolls back only when an exception propagates out of the
+block, so a method that catches-and-returns inside a transaction causes the
+context manager to **commit** the partial work.
+
+- New CRUD / SQL / script methods: on an **operational** failure let the
+  driver exception propagate (or `log + raise`, as `merge` does). Return the
+  result dict only on success. Don't add a `try/except` that only logs and
+  re-raises — keep `try` solely for a `finally` (cursor cleanup) or an
+  `except` that does real work (e.g. `execute_script` rolls back first).
+- **Misuse / bad arguments** (invalid columns, empty/missing `key_columns`,
+  malformed `data`/`conditions`) raise `ValueError`/`TypeError` *before* any
+  DB work — see `select`, `merge`, `bulk_update`. Don't return `{"status":
+  -1}` for these.
+- **Streaming is the deliberate exception** (`stream_*`, `stream_to_csv`):
+  per-row / aggregate `status` + `max_error_count` / `abort_on_error` give
+  partial-failure tolerance. Hard failures still raise.
+- "Don't crash the batch" belongs in the *application* layer (wrap and
+  convert to the app's own status/alert), not in the library.
+
+The whole data API now obeys this (the historical `insert`/`bulk_update`/
+`merge_select`/`execute_script`/`run_script_from_file` swallowers were
+converted to raise). Streaming is the only `status: -1` path left. Full
+rationale: docs/database.md → "The Error Contract".
+
+## SQL expressions in values (invariant)
+
+`Raw` ([longjrm/utils/sql.py](longjrm/utils/sql.py), exported from the
+package root) is the only type-safe way to pass a SQL expression as a
+value: constructors and WHERE parsers recognize it by `isinstance` and
+render it at SQL-construction time, so JSON-deserialized data can never
+produce one. The backtick CURRENT-keyword strings (`` `CURRENT TIMESTAMP` ``)
+are kept for backward compatibility only.
+
+**Never extend string-content-based SQL detection.** Any scheme that
+promotes a string to SQL based on its content (new entries in
+`CURRENT_KEYWORDS`, prefix/wrapper conventions, substring checks) can be
+triggered by values arriving in untrusted JSON — that's an injection
+vector by construction. When a new expression need comes up, the answer is
+`Raw(...)`, not a new magic string.
+
 ## Async API design (Strategy A: threadpool-backed)
 
 This is the load-bearing design decision in 0.2.0 and the one most likely
@@ -99,5 +146,5 @@ overrides like `_construct_select_sql()` if the default isn't portable.
 
 - CRUD / where-condition / placeholder syntax → README + `db.py`.
 - Module tree → `ls`.
-- Dependency list → [pyproject.toml](pyproject.toml) / [requirements.txt](requirements.txt).
+- Dependency list → [pyproject.toml](pyproject.toml) (`dependencies` + `optional-dependencies`).
 - Step-by-step "add a database" tutorial → contribute to README if needed.

@@ -10,7 +10,12 @@ class SqlServerDb(Db):
     """
     Microsoft SQL Server database implementation.
     """
-    
+
+    # merge_select(): SQL Server uses MERGE INTO ...; the statement must be
+    # terminated with a semicolon.
+    _merge_select_style = 'merge_into'
+    _merge_select_terminator = ';'
+
     def __init__(self, client):
         super().__init__(client)
         # SQL Server (pyodbc) uses ? as placeholder
@@ -33,20 +38,6 @@ class SqlServerDb(Db):
     def get_stream_cursor(self):
         """Get a cursor optimized for streaming."""
         return self.conn.cursor()
-
-    def _bulk_insert(self, table, data_list, return_columns=None, bulk_size=1000):
-        """
-        SQL Server specific bulk insert with validation.
-        """
-        if data_list:
-            # Validate column consistency
-            first_row = data_list[0]
-            keys_set = set(first_row.keys())
-            for i, row in enumerate(data_list):
-                if set(row.keys()) != keys_set:
-                    raise ValueError(f"Inconsistent columns at row {i}")
-                    
-        return super()._bulk_insert(table, data_list, return_columns, bulk_size)
 
     def supports_returning(self):
         """
@@ -97,10 +88,16 @@ class SqlServerDb(Db):
             
         return f"select {top_clause}{str_column} from {table}{str_where}{str_order}"
 
-    def merge(self, table, data, key_columns, column_meta=None, update_columns=None, no_update='N', bulk_size=0):
+    def merge(self, table, data, key_columns, no_update=None, *, update_columns=None, bulk_size=0):
         """
         Merge (Upsert) data into table for SQL Server using MERGE statement.
+
+        Mirrors the base ``merge(table, data, key_columns, no_update)``
+        signature (async delegation passes ``no_update`` positionally);
+        SQL Server-specific extras are keyword-only.
         """
+        no_update = self._no_update_flag(no_update)
+
         if not data:
             return {"status": 0, "message": "Merge data is empty", "data": [], "count": 0}
 
@@ -173,18 +170,21 @@ class SqlServerDb(Db):
                 ON ({match_str})
                 """
                 
-                if no_update != 'Y' and update_set_str:
+                if not no_update and update_set_str:
                     sql += f" WHEN MATCHED THEN UPDATE SET {update_set_str}"
                     
                 sql += f" WHEN NOT MATCHED THEN INSERT ({insert_cols_str}) VALUES ({insert_vals_str});" # SQL Server requires semi-colon for MERGE usually
                 
-                # Flatten values
+                # Flatten values. Raw expressions skip _process_value and ride
+                # through to inject_current, which replaces their placeholder
+                # with the expression text (per row, so mixed rows are fine).
                 params = []
                 for row in batch:
                     for k in data_keys:
-                        params.append(self._process_value(row.get(k)))
-                
-                # Inject current timestamp or other raw SQL literals
+                        v = row.get(k)
+                        params.append(v if isinstance(v, sql_utils.Raw) else self._process_value(v))
+
+                # Inject Raw expressions / CURRENT keywords into the SQL
                 sql, params = sql_utils.inject_current(sql, params, self.placeholder)
 
                 cur.execute(sql, params)
@@ -195,9 +195,8 @@ class SqlServerDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_affected}
 
         except Exception as e:
-            message = f"Failed to merge SQL Server: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to merge SQL Server: {e}", exc_info=True)
+            raise
         finally:
             if cur:
                 cur.close()

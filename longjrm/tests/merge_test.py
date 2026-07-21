@@ -315,6 +315,186 @@ def test_error_handling():
     
     pools[db_key].dispose()
 
+
+def _merge_select_create_sql(database_type, table, is_target):
+    """DDL for the merge_select test tables, per dialect.
+
+    The merge key is ``email``. Target tables get it as NOT NULL PRIMARY KEY so
+    the INSERT ... ON CONFLICT backends (PostgreSQL/MySQL/SQLite) have the unique
+    index they require (and Db2 won't allow a nullable PK); the MERGE INTO
+    backends don't need it but it's harmless. Spark/Delta has no PK constraints,
+    so it's omitted there and the table is created USING DELTA. Avoiding an
+    identity/auto-increment ``id`` column keeps the DDL portable everywhere.
+    """
+    vc = "VARCHAR2" if database_type == "oracle" else "VARCHAR"
+    email = f"email {vc}(100)"
+    if is_target and database_type != "spark":
+        email += " NOT NULL PRIMARY KEY"
+    cols = f"{email}, name {vc}(100), status {vc}(20), age INTEGER"
+    sql = f"CREATE TABLE {table} ({cols})"
+    if database_type == "spark":
+        sql += " USING DELTA"
+    return sql
+
+
+def _merge_select_drop(db, table):
+    """Drop a table, tolerating 'does not exist' (Db2/Oracle lack IF EXISTS)."""
+    try:
+        if db.database_type in ("oracle", "db2"):
+            db.execute(f"DROP TABLE {table}")
+        else:
+            db.execute(f"DROP TABLE IF EXISTS {table}")
+    except Exception:
+        pass
+
+
+def test_merge_select_sql(db_key, backend=PoolBackend.DBUTILS):
+    """Test merge_select across all SQL backends: PostgreSQL/MySQL/SQLite via
+    INSERT ... ON CONFLICT, and Db2/Oracle/SQL Server via MERGE INTO.
+
+    (Spark merge_select is covered in spark_test.py, like the other Spark tests.)
+    """
+    print(f"\n=== Testing {db_key} merge_select Operations with {backend.value} backend ===")
+
+    cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+    configure(cfg)
+    db_cfg = cfg.require(db_key)
+
+    pools = {}
+    pools[db_key] = Pool.from_config(db_cfg, backend)
+
+    with pools[db_key].client() as client:
+        db = get_db(client)
+        print(f"Connected to {db.database_type} database: {db.database_name}")
+
+        # Set up test tables
+        print("\n--- Setting up test data for merge_select ---")
+        try:
+            _merge_select_drop(db, "merge_select_source")
+            _merge_select_drop(db, "merge_select_target")
+            db.execute(_merge_select_create_sql(db.database_type, "merge_select_source", is_target=False))
+            db.execute(_merge_select_create_sql(db.database_type, "merge_select_target", is_target=True))
+
+            source_data = [
+                {"email": "alice@test.com", "name": "Alice Source", "status": "active", "age": 25},
+                {"email": "bob@test.com", "name": "Bob Source", "status": "active", "age": 30},
+                {"email": "charlie@test.com", "name": "Charlie Source", "status": "inactive", "age": 35},
+            ]
+            db.insert("merge_select_source", source_data)
+            db.insert("merge_select_target",
+                      [{"email": "alice@test.com", "name": "Alice Old", "status": "pending", "age": 20}])
+            print("SUCCESS: Test tables created with initial data")
+        except Exception as e:
+            print(f"ERROR: Could not set up merge_select test data: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+
+        # Test 1: Basic merge (update existing + insert new)
+        print("\n--- Test 1: Basic merge_select ---")
+        result = db.merge_select(
+            source_table="merge_select_source", target_table="merge_select_target",
+            insert_columns=["email", "name", "status", "age"], key_columns=["email"])
+        assert result["status"] == 0, f"merge_select should succeed: {result.get('message')}"
+        rows = db.query("SELECT email, name, status, age FROM merge_select_target")["data"]
+        assert len(rows) == 3, "should have 3 rows"
+        alice = next(r for r in rows if r["email"] == "alice@test.com")
+        assert alice["name"] == "Alice Source" and alice["age"] == 25, "alice should be updated from source"
+        print("SUCCESS: Basic merge_select test passed")
+
+        # Test 2: equality dict condition
+        print("\n--- Test 2: merge_select with Conditions ---")
+        db.execute("DELETE FROM merge_select_target")
+        result = db.merge_select(
+            source_table="merge_select_source", target_table="merge_select_target",
+            insert_columns=["email", "name", "status", "age"], key_columns=["email"],
+            conditions={"status": "active"})
+        assert result["status"] == 0, f"conditional merge_select should succeed: {result.get('message')}"
+        assert len(db.query("SELECT email FROM merge_select_target")["data"]) == 2, "2 active users"
+        print("SUCCESS: merge_select with conditions test passed")
+
+        # Test 3: custom source SELECT (no ORDER BY: meaningless for a merge
+        # source and SQL Server rejects it inside the USING subquery)
+        print("\n--- Test 3: merge_select with Custom Source SELECT ---")
+        db.execute("DELETE FROM merge_select_target")
+        result = db.merge_select(
+            source_table=None, target_table="merge_select_target",
+            insert_columns=["email", "name", "status", "age"], key_columns=["email"],
+            source_select="SELECT email, name, status, age FROM merge_select_source WHERE age >= 30")
+        assert result["status"] == 0, f"custom SELECT merge_select should succeed: {result.get('message')}"
+        assert len(db.query("SELECT email FROM merge_select_target")["data"]) == 2, "2 users age>=30"
+        print("SUCCESS: merge_select with custom SELECT test passed")
+
+        # Test 4: order_by param (ignored on MERGE backends, applied on the rest)
+        print("\n--- Test 4: merge_select with ORDER BY ---")
+        db.execute("DELETE FROM merge_select_target")
+        result = db.merge_select(
+            source_table="merge_select_source", target_table="merge_select_target",
+            insert_columns=["email", "name", "status", "age"], key_columns=["email"],
+            order_by="age DESC")
+        assert result["status"] == 0, f"ORDER BY merge_select should succeed: {result.get('message')}"
+        print("SUCCESS: merge_select with ORDER BY test passed")
+
+        # Test 5: custom update_columns (name must NOT be updated)
+        print("\n--- Test 5: merge_select with Custom Update Columns ---")
+        db.execute("DELETE FROM merge_select_target")
+        db.insert("merge_select_target",
+                  [{"email": "alice@test.com", "name": "Keep This Name", "status": "old_status", "age": 99}])
+        result = db.merge_select(
+            source_table="merge_select_source", target_table="merge_select_target",
+            insert_columns=["email", "name", "status", "age"], key_columns=["email"],
+            update_columns=["status", "age"])
+        assert result["status"] == 0, f"custom update_columns should succeed: {result.get('message')}"
+        rows = db.query("SELECT email, name, status, age FROM merge_select_target")["data"]
+        alice = next(r for r in rows if r["email"] == "alice@test.com")
+        assert alice["name"] == "Keep This Name", "alice name should NOT be updated"
+        assert alice["status"] == "active" and alice["age"] == 25, "alice status/age SHOULD be updated"
+        print("SUCCESS: merge_select with custom update_columns test passed")
+
+        # Test 6: operator + list conditions, parameterized by default
+        print("\n--- Test 6: Operator/List Conditions (parameterized) ---")
+        db.execute("DELETE FROM merge_select_target")
+        result = db.merge_select(
+            source_table="merge_select_source", target_table="merge_select_target",
+            insert_columns=["email", "name", "status", "age"], key_columns=["email"],
+            conditions=[{"age": {">=": 30}}])  # bob(30), charlie(35)
+        assert result["status"] == 0, f"operator/list conditions should succeed: {result.get('message')}"
+        rows = db.query("SELECT email, age FROM merge_select_target")["data"]
+        assert len(rows) == 2 and all(r["age"] >= 30 for r in rows), "only age>=30 rows merged"
+        print("SUCCESS: operator/list conditions (parameterized) test passed")
+
+        # Test 7: same filter via inline mode (dynamic_param='N')
+        print("\n--- Test 7: Inline Conditions (dynamic_param='N') ---")
+        db.execute("DELETE FROM merge_select_target")
+        result = db.merge_select(
+            source_table="merge_select_source", target_table="merge_select_target",
+            insert_columns=["email", "name", "status", "age"], key_columns=["email"],
+            conditions=[{"age": {">=": 30}}], dynamic_param="N")
+        assert result["status"] == 0, f"inline conditions should succeed: {result.get('message')}"
+        assert len(db.query("SELECT email FROM merge_select_target")["data"]) == 2, "same 2 rows"
+        print("SUCCESS: inline conditions (dynamic_param='N') test passed")
+
+        # Test 8: a single-quote value must not break either mode
+        # (bind path binds it; inline path single-quote-escapes it)
+        print("\n--- Test 8: Quote Safety (bind + inline) ---")
+        for mode in ("Y", "N"):
+            db.execute("DELETE FROM merge_select_target")
+            result = db.merge_select(
+                source_table="merge_select_source", target_table="merge_select_target",
+                insert_columns=["email", "name", "status", "age"], key_columns=["email"],
+                conditions=[{"name": {"=": "O'Brien"}}], dynamic_param=mode)  # matches nothing
+            assert result["status"] == 0, f"quote-safe conditions (mode {mode}) should succeed: {result.get('message')}"
+            assert len(db.query("SELECT email FROM merge_select_target")["data"]) == 0, f"no O'Brien match ({mode})"
+        print("SUCCESS: quote-safety (bind + inline) test passed")
+
+        # Cleanup
+        _merge_select_drop(db, "merge_select_source")
+        _merge_select_drop(db, "merge_select_target")
+        print("SUCCESS: Cleaned up merge_select test tables")
+
+    pools[db_key].dispose()
+
+
 if __name__ == "__main__":
     print("=== JRM Merge Function Test Suite ===")
     
@@ -327,6 +507,7 @@ if __name__ == "__main__":
     
     for db_key, backend in active_configs:
          test_combinations.append((db_key, backend, test_sql_database))
+         test_combinations.append((db_key, backend, test_merge_select_sql))
     
     # Test all available database/backend combinations, abort on first failure
     combinations_tested = 0

@@ -1,5 +1,6 @@
 
 import logging
+import traceback
 import ibm_db
 import datetime
 import json
@@ -15,7 +16,11 @@ class Db2Db(Db):
     """
     Db2 database implementation.
     """
-    
+
+    # merge_select(): Db2 uses MERGE INTO ... USING (SELECT ...) with ELSE IGNORE.
+    _merge_select_style = 'merge_into'
+    _merge_select_else_clause = 'ELSE IGNORE'
+
     def __init__(self, client):
         super().__init__(client)
         self.placeholder = '?' # Db2 uses ? as placeholder
@@ -47,11 +52,18 @@ class Db2Db(Db):
         """Db2 uses MERGE INTO standard SQL for upserts."""
         raise NotImplementedError("Db2 does not support INSERT ... ON CONFLICT syntax. Use merge() method instead.")
 
-    def merge(self, table, data, key_columns, column_meta=None, update_columns=None, no_update='N', bulk_size=0):
+    def merge(self, table, data, key_columns, no_update=None, *,
+              column_meta=None, update_columns=None, bulk_size=0):
         """
         Merge (Upsert) data into table for DB2.
         Overrides base method to use DB2 specific MERGE syntax.
+
+        Mirrors the base ``merge(table, data, key_columns, no_update)``
+        signature (async delegation passes ``no_update`` positionally);
+        DB2-specific extras are keyword-only.
         """
+        no_update = self._no_update_flag(no_update)
+
         if not data:
             return {"status": 0, "message": "No data to merge", "data": [], "count": 0}
 
@@ -87,8 +99,8 @@ class Db2Db(Db):
 
             # Construct SQL
             sql = f"MERGE INTO {table} AS A USING TABLE (VALUES ({values_clause})) AS TMP ({column_str}) ON ({match_str}) "
-            
-            if no_update != 'Y' and update_set_str:
+
+            if not no_update and update_set_str:
                 sql += f"WHEN MATCHED THEN UPDATE SET {update_set_str} "
             
             sql += f"WHEN NOT MATCHED THEN INSERT ({insert_col_str}) VALUES ({insert_val_str}) ELSE IGNORE"
@@ -122,10 +134,9 @@ class Db2Db(Db):
                     "count": total_affected
                 }
             except Exception as e:
-                message = f'Failed to execute bulk merge: {e}'
-                logger.error(message)
+                logger.error(f'Failed to execute bulk merge: {e}')
                 logger.error(traceback.format_exc())
-                return {"status": -1, "message": message}
+                raise
             finally:
                 if cur:
                     cur.close()
@@ -145,17 +156,23 @@ class Db2Db(Db):
             # Pre-calculate literal values to simulate legacy behavior
             literals = {}
             for k, val in data.items():
-                if val is None:
+                if isinstance(val, sql_utils.Raw):
+                    # Trusted SQL expression: rendered verbatim.
+                    literals[k] = val.text
+                elif val is None:
                     literals[k] = 'NULL'
                 elif isinstance(val, (dict, list)):
                      val_str = json.dumps(val, ensure_ascii=False)
                      escaped = val_str.replace("'", "''")
                      literals[k] = f"'{escaped}'"
                 elif isinstance(val, str):
-                    if val.startswith('`') and val.endswith('`'):
-                         literals[k] = val[1:-1]
+                    # Only the backtick-escaped CURRENT keywords are emitted as
+                    # raw SQL (consistent with the rest of the library);
+                    # arbitrary backtick-wrapped strings stay quoted literals.
+                    if sql_utils.check_current_keyword(val):
+                         literals[k] = sql_utils.unescape_current_keyword(val)
                     else:
-                        escaped = val.replace("'", "''") 
+                        escaped = val.replace("'", "''")
                         literals[k] = f"'{escaped}'"
                 elif isinstance(val, (datetime.date, datetime.datetime)):
                      literals[k] = f"'{val}'"
@@ -176,7 +193,7 @@ class Db2Db(Db):
                 update_parts.append(f"{k}={literals[k]}")
             update_str = ','.join(update_parts)
 
-            if no_update == 'Y':
+            if no_update:
                  sql = f"MERGE INTO {table} AS A USING TABLE (VALUES ({value_str})) AS TMP ({column_str}) ON ({match_str}) " \
                        f"WHEN NOT MATCHED THEN INSERT ({column_str}) VALUES ({insert_str}) ELSE IGNORE"
             else:
@@ -185,52 +202,6 @@ class Db2Db(Db):
                        f"WHEN NOT MATCHED THEN INSERT ({column_str}) VALUES ({insert_str}) ELSE IGNORE"
             
             return self.execute(sql)
-
-    def merge_select(self, source_table, target_table, insert_columns, key_columns, order_by=None,
-                     conditions=None, source_select=None, update_columns=None, isolation_clause=''):
-        """
-        Merge data from source table via select into target table for DB2.
-        """
-        insert_column_str = ','.join(insert_columns)
-        match_str = ''
-        
-        for kc in key_columns:
-            match_str += f" AND A.{kc} = SRC.{kc}"
-        match_str = match_str[5:]
-
-        if not update_columns:
-             update_columns = [c for c in insert_columns if c not in key_columns]
-        
-        update_str = ','.join([f"{k} = SRC.{k}" for k in update_columns])
-        insert_str = ','.join([f"SRC.{k}" for k in insert_columns])
-
-        if source_select:
-             # Using provided select statement
-             unescaped_source = Db.unescape_current_keyword(source_select) if hasattr(Db, 'unescape_current_keyword') else source_select
-             source_sql = unescaped_source
-        else:
-             cond_str = ""
-             if conditions:
-                 if isinstance(conditions, dict):
-                     parts = []
-                     for k, v in conditions.items():
-                         if isinstance(v, str):
-                             parts.append(f"{k}='{v}'")
-                         else:
-                             parts.append(f"{k}={v}")
-                     if parts:
-                         cond_str = " WHERE " + " AND ".join(parts)
-                 elif isinstance(conditions, str):
-                     cond_str = conditions
-             
-             clause = f"ORDER BY {order_by}" if order_by else ""
-             source_sql = f"SELECT {insert_column_str} FROM {source_table} {cond_str} {clause} {isolation_clause}"
-
-        sql = f"MERGE INTO {target_table} AS A USING ({source_sql}) AS SRC ON ({match_str}) " \
-              f"WHEN MATCHED THEN UPDATE SET {update_str} " \
-              f"WHEN NOT MATCHED THEN INSERT ({insert_column_str}) VALUES ({insert_str}) ELSE IGNORE"
-              
-        return self.execute(sql)
 
     def bulk_load(self, table, load_info=None, *, command=None):
         """
@@ -259,7 +230,7 @@ class Db2Db(Db):
             
         return self.load_admin_cmd(final_load_info)
 
-    def load_admin_cmd(self, load_info={}, load_cmd=''):
+    def load_admin_cmd(self, load_info=None, load_cmd=''):
         """
         Execute DB2 LOAD via ADMIN_CMD stored procedure.
         
@@ -279,6 +250,8 @@ class Db2Db(Db):
         # if source is file, the file must exist on server
         # to be noted that delprioritychar is used for non-cursor type to revert delimiter priority to
         # character delimiter, record delimiter, column delimiter
+        if load_info is None:
+            load_info = {}
         if not load_cmd:
             if not isinstance(load_info, dict):
                 raise TypeError(f"load_admin_cmd requires a configuration dictionary for 'load_info', got {type(load_info).__name__}")
@@ -373,12 +346,13 @@ class Db2Db(Db):
                 logger.error(message)
                 return {"status": -1, "message": message}
         except Exception as e:
-            message = f"Failed to execute ADMIN_CMD stored procedure: {load_cmd}. {e}"
-            logger.error(message)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to execute ADMIN_CMD stored procedure: {load_cmd}. {e}")
+            raise
 
-    def export_admin_cmd(self, export_info={}, export_cmd=''):
+    def export_admin_cmd(self, export_info=None, export_cmd=''):
         """Execute export via ADMIN_CMD stored procedure"""
+        if export_info is None:
+            export_info = {}
         if not export_cmd:
             export_cmd = f"EXPORT TO {export_info.get('target')} OF {export_info.get('filetype')} " \
                 f"FROM ({export_info.get('source')}) MESSAGES ON SERVER "
@@ -439,9 +413,8 @@ class Db2Db(Db):
                 logger.error(message)
                 return {"status": -1, "message": message}
         except Exception as e:
-            message = f"Failed to execute ADMIN_CMD stored procedure: {export_cmd}. {e}"
-            logger.error(message)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to execute ADMIN_CMD stored procedure: {export_cmd}. {e}")
+            raise
 
     def admin_cmd(self, params):
         """Generic method to execute ADMIN_CMD stored procedure"""
@@ -465,9 +438,8 @@ class Db2Db(Db):
                 logger.error(message)
                 return {"status": -1, "message": message}
         except Exception as e:
-            message = f"Failed to execute ADMIN_CMD stored procedure: {params}. {e}"
-            logger.error(message)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to execute ADMIN_CMD stored procedure: {params}. {e}")
+            raise
 
     def add_partition(self, table, partition_name, boundary=None, in_tbs=None, idx_tbs=None):
         sql = f"alter table {table} add partition {partition_name} {boundary}"
@@ -493,50 +465,43 @@ class Db2Db(Db):
             sql = f"select status, access_mode from syscat.datapartitions " \
                 f"where TABSCHEMA = '{schema}' and tabname = '{table}'"
 
+        # query() raises on failure (error contract), so only the row-count
+        # outcomes need handling here.
         result = self.query(sql)
 
-        if result['status'] == 0:
-            if len(result['data']) == 1:
-                message = f"Got {schema}.{table} {partition_name} partition status: {result['data'][0]['STATUS']}"
-                logger.info(message)
-                return {"status": 0, "data": result['data'], "message": message}
-            elif len(result['data']) == 0:
-                message = f"No partition is found for {schema}.{table} {partition_name}"
-                logger.warning(message)
-                return {"status": 1, "data": [], "message": message}
-            else:
-                message = f"Multiple partions are found for {schema}.{table}"
-                logger.warning(message)
-                return {"status": 1, "data": result['data'], "message": message}
+        if len(result['data']) == 1:
+            message = f"Got {schema}.{table} {partition_name} partition status: {result['data'][0]['STATUS']}"
+            logger.info(message)
+            return {"status": 0, "data": result['data'], "message": message}
+        elif len(result['data']) == 0:
+            message = f"No partition is found for {schema}.{table} {partition_name}"
+            logger.warning(message)
+            return {"status": 1, "data": [], "message": message}
         else:
-            message = f"Failed to get partition status of {schema}.{table} {partition_name}. {result['message']}"
-            logger.error(message)
-            return {"status": -1, "message": message}
+            message = f"Multiple partions are found for {schema}.{table}"
+            logger.warning(message)
+            return {"status": 1, "data": result['data'], "message": message}
 
     def drop_detached_partition(self, schema, table):
 
         status_result = self.check_partition(schema, table)
 
-        if status_result['status'] == 0:
-            if status_result['data'][0]['STATUS'] == '' and status_result['data'][0]['ACCESS_MODE'] == 'F':
-                sql = f"drop table {schema}.{table}"
-                result = self.execute(sql)
-                if result['status'] == 0:
-                    message = f"Table {schema}.{table} has been dropped successfully."
-                    logger.info(message)
-                    return {"status": 0, "message": message}
-                else:
-                    message = f"Failed to drop table partition {schema}.{table}. {result['message']}"
-                    logger.error(message)
-                    return {"status": 0, "message": message}
-            else:
-                message = f"Partition status of {schema}.{table} is " \
-                    f"{status_result['data'][0]['STATUS']}, " \
-                    f"access mode is {status_result['data'][0]['ACCESS_MODE']}. It can not be dropped."
-                logger.warning(message)
-                return {"status": 1, "message": message}
+        # No partition found / multiple partitions: nothing to drop.
+        if status_result['status'] != 0:
+            return status_result
+
+        if status_result['data'][0]['STATUS'] == '' and status_result['data'][0]['ACCESS_MODE'] == 'F':
+            # execute() raises on failure (error contract).
+            self.execute(f"drop table {schema}.{table}")
+            message = f"Table {schema}.{table} has been dropped successfully."
+            logger.info(message)
+            return {"status": 0, "message": message}
+        else:
+            message = f"Partition status of {schema}.{table} is " \
+                f"{status_result['data'][0]['STATUS']}, " \
+                f"access mode is {status_result['data'][0]['ACCESS_MODE']}. It can not be dropped."
             logger.warning(message)
-            return {"status": status_result['status'], "message": message}
+            return {"status": 1, "message": message}
 
     def runstats(self, table, custom_cmd=''):
         """

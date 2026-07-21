@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Consistent error contract: data methods now raise on failure instead of returning `{"status": -1}`** (BREAKING). Methods that previously caught operational errors and returned a `{"status": -1, "message": ...}` dict now log and re-raise. The single contract is now: **success → result dict with `status: 0`; operational failure → raise the driver exception; misuse (bad arguments) → raise `ValueError`/`TypeError`.** This spans:
+  - **Base methods**: `insert`, `bulk_update`, `merge_select`, `execute_script`, `run_script_from_file` (joining `query`/`execute`/`select`/`update`/`delete`/`merge`, which already raised).
+  - **Backend overrides** (these were missed initially and swallowed independently of the base): `sqlite.query`; `spark.query`/`execute`/`_single_insert`/`_bulk_insert`/`update`/`delete`/`merge`/`bulk_load`; `oracle._bulk_insert`/`merge`; `db2.merge` and the `except` paths of `load_admin_cmd`/`export_admin_cmd`/`admin_cmd`; `mysql.bulk_load`; `postgres.bulk_load`; `sqlserver.merge`.
+
+  This fixes a latent atomicity bug — inside `pool.transaction()`, a swallowed error let the context manager commit partial work instead of rolling back (rollback only fires when an exception propagates). **Preserved as result statuses (not raises):** DB2 `ADMIN_CMD` LOAD/EXPORT outcomes (`ROWS_LOADED`/`ROWS_REJECTED`/`ROWS_DELETED` reporting), Spark's `_check_delta_support()` capability guards, and the **streaming** methods (`stream_*`, `stream_to_csv`) with their per-row / aggregate `status` + `max_error_count` / `abort_on_error` semantics. Applications that need to continue past an error should wrap the call (see docs/database.md → "The Error Contract"). Callers that checked `result['status'] == -1` must switch to `try/except`.
+- **`bulk_update` misuse now raises `ValueError`** (BREAKING, minor): passing rows whose data is missing the declared `key_columns` previously returned `{"status": -1}`; it now raises `ValueError`, consistent with how `merge`/`select` already report invalid arguments. (Operational DB errors raise the driver exception; argument/misuse errors raise `ValueError`/`TypeError`.)
+
+### Added
+
+- **Data-engineering `rows_*` count keys (additive, non-breaking)**: result dicts now expose the standard `rows_*` names alongside the historical count keys, so counts read uniformly across a pipeline — `rows_read` (`query`/`select`, stream pull = `record_count`), `rows_inserted`/`rows_updated`/`rows_deleted`/`rows_merged` (the matching write methods, from `count`), and `rows_rejected` (streams, from `reject_count`). `SparkDb` gets the same on its overrides; async delegates and inherits for free. Each alias is added only when its source key is present.
+
+### Deprecated
+
+- **Old count keys now nudge toward `rows_*`**: reading `count` (`query`/`insert`/`update`/`delete`/`merge`) or `record_count`/`reject_count` (streams) emits a `DeprecationWarning` pointing to its `rows_*` replacement. The old keys still work and reads of the new keys are silent — this is only the migration hint. Planned unification path:
+  - **this release**: `rows_*` available + old keys deprecated (warn-on-access);
+  - **next**: add `rows_affected` / `rows_returned` (for `execute` and the file ops, whose `count`/`row_count` are not yet aliased and therefore not yet deprecated), and deprecate the remaining old keys;
+  - **then**: remove the old keys — unification complete.
+
+## [0.3.0] - 2026-06-11
+
+### Fixed
+
+- **`merge_select` broken on Oracle / SQL Server / Spark**: those backends inherited the base `INSERT ... ON CONFLICT` implementation, which they don't support, so every `merge_select` call returned a `NotImplementedError` failure (only PostgreSQL/MySQL/SQLite and Db2 worked). `merge_select` is now generic across **all** backends — Db2/Oracle/SQL Server/Spark use a shared `MERGE INTO ... USING (SELECT ...)` builder (with per-dialect handling for the `AS` alias keyword, Db2 `ELSE IGNORE`, the SQL Server trailing `;`, and Spark's qualified `SET` targets), while PostgreSQL/MySQL/SQLite keep the `INSERT ... ON CONFLICT / ON DUPLICATE KEY` path. The Db2-specific `merge_select` override is removed in favor of the shared builder.
+- **`merge_select` conditions: operators silently dropped on Db2**: the old Db2 override only understood a flat-equality dict (`{col: val}`) or a raw string; any other shape (e.g. operator/range conditions) fell through and the WHERE clause was **silently omitted**, merging the entire source table. Conditions now route through the shared `where_parser` on every backend.
+- **`merge_select` on SQLite**: `INSERT ... SELECT ... ON CONFLICT` with no `WHERE` raised `near "DO": syntax error` (SQLite parses `ON` as a join clause); a `WHERE 1=1` disambiguator is now added on SQLite when the source SELECT has no filter.
+
+### Changed
+
+- **`merge_select` `order_by` is ignored for the MERGE INTO backends** (Db2/Oracle/SQL Server/Spark): it cannot affect merge semantics and is illegal inside the `USING` subquery on SQL Server. It is still applied for the `INSERT ... SELECT` (PostgreSQL/MySQL/SQLite) family.
+
+### Added
+
+- **`merge_select`: SQL-injection-safe conditions by default**: condition values are now **bound as parameters** by default (`dynamic_param='Y'`, consistent with `select()`), instead of being inlined into the SQL. Pass `dynamic_param='N'` to inline (quoted/escaped); Spark always inlines because its connector can't bind here. New shared helper `longjrm.utils.sql.build_where` returns `(clause, values)`; `build_inline_where` remains as a thin inline wrapper.
+- **`merge_select` conditions: operators and list-of-conditions support**: `conditions` accepts, on every backend, (1) a raw clause string (verbatim), (2) a dict with operator/`IN`/`$and`/`$or` support (e.g. `{"col": {">": x, "<=": y}}`), or (3) a list of condition dicts AND-ed together (e.g. `[{"col": {">": x}}, {"col": {"<=": y}}]`). Backtick-escaped CURRENT keywords are emitted as SQL keywords.
+- **`merge_select`: `isolation_clause` available on all backends** (previously Db2-only), appended to the source SELECT; defaults to empty.
+
 ---
 
 ## [0.2.0] - 2026-05-11

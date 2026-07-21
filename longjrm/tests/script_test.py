@@ -128,10 +128,11 @@ class TestScriptExecution:
             with pool.client() as client:
                 db = get_db(client)
                 
-                # Execute script with transaction=True
-                result = db.execute_script(sql_script, transaction=True)
-                assert result['status'] == -1
-                
+                # Script failure now raises (error contract); transaction=True
+                # must still roll back before the exception propagates.
+                with pytest.raises(Exception):
+                    db.execute_script(sql_script, transaction=True)
+
                 # Verify NO data persisted
                 result = db.select('test_script')
                 assert result['count'] == 0
@@ -155,9 +156,11 @@ class TestScriptExecution:
                 # execute_script calls self.execute() which typically commits if autocommit is on
                 # but db.execute doesn't explicitly commit unless autocommit is on at connection level.
                 
-                result = db.execute_script(sql_script, transaction=False)
-                assert result['status'] == -1
-                
+                # Failure raises; statements before the error may still have
+                # persisted (autocommit), which is verified below.
+                with pytest.raises(Exception):
+                    db.execute_script(sql_script, transaction=False)
+
                 # Verify first item persisted
                 # In Postgres, if one statement fails in a block, sometimes it invalidates the whole transaction if not in autocommit.
                 # But here we are calling execute() sequentially in python loop.

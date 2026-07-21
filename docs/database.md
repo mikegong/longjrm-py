@@ -281,6 +281,14 @@ All query operations return a standardized response format:
 }
 ```
 
+> **Column key casing — always lowercase.** Result-row dict keys (and the
+> `columns` list) are normalized to lowercase on every backend, regardless of
+> the driver's native identifier folding. DB2 and Oracle report unquoted
+> identifiers in UPPERCASE and PostgreSQL in lowercase, so LongJRM lowercases
+> them to give portable, backend-independent keys. Always read results with
+> lowercase keys (`row["etl_key"]`), never `row["ETL_KEY"]` — the latter
+> returns `None`/`KeyError` even though the table column is uppercase.
+
 ### Database-Specific Query Handling
 
 #### SQL Databases (PostgreSQL, MySQL)
@@ -426,6 +434,30 @@ result = db.select(
     }
 )
 ```
+
+#### 4. NULL Conditions
+
+`None` is rendered as proper SQL `NULL` semantics — never `= NULL` (which is
+always unknown and silently matches nothing):
+
+```python
+# IS NULL
+db.select("users", where={"deleted_at": None})            # deleted_at IS NULL
+db.select("users", where={"deleted_at": {"=": None}})     # same
+
+# IS NOT NULL  — use the != / <> operator with None
+db.select("users", where={"deleted_at": {"!=": None}})    # deleted_at IS NOT NULL
+
+# None inside IN / NOT IN is split out automatically:
+db.select("users", where={"role": {"IN": ["admin", None]}})
+#   -> (role IN (?) OR role IS NULL)
+db.select("users", where={"$nin": {"role": ["admin", None]}})
+#   -> (role NOT IN (?) AND role IS NOT NULL)   -- avoids the NOT-IN-NULL trap
+```
+
+Only `=`/`==`/`IS` and `!=`/`<>`/`IS NOT`/`NOT` are defined against `None`. Any
+other operator with a `None` value (e.g. `{"age": {">": None}}`) raises
+`ValueError` rather than silently producing a query that matches no rows.
 
 ### Query Options
 
@@ -617,30 +649,59 @@ user_data = {
 result = db.select(table="users", where={"id": 123})
 ```
 
-### SQL Keywords and Special Values
+### SQL Expressions and Keywords (`Raw`)
 
-Handle SQL keywords and special values with backtick escaping:
+To pass a SQL expression (rather than data) as a value, wrap it in `Raw` — or
+use the ready-made `CURRENT_TIMESTAMP` / `CURRENT_DATE` constants:
 
 ```python
-# CURRENT timestamp and date values
+from longjrm import Raw, CURRENT_TIMESTAMP, CURRENT_DATE
+
+# Server-side timestamps on insert/update/merge
+db.insert("audit_log", {
+    "event": "login",
+    "created_at": CURRENT_TIMESTAMP,        # rendered as SQL, not bound
+})
+db.update("users", {"updated_at": CURRENT_TIMESTAMP}, {"id": 123})
+db.merge("users", {"id": 1, "synced_at": CURRENT_TIMESTAMP}, ["id"])
+
+# Any SQL expression works, including dialect-specific ones
+db.select("audit_log", where={
+    "created_at": {">=": Raw("CURRENT_DATE - 7")},
+})
+
+# Bound values in raw SQL can be expressions too
+db.execute("INSERT INTO t (id, ts) VALUES (?, ?)", [5, CURRENT_TIMESTAMP])
+```
+
+`Raw` values are rendered into the generated SQL verbatim — no placeholder is
+emitted and nothing is bound. Because `Raw` instances can only be constructed
+from Python code, data deserialized from JSON can never produce one: untrusted
+input cannot escalate to SQL. **Never wrap untrusted strings in `Raw`.**
+
+Notes:
+
+- Not supported in positionally-bound bulk paths (`bulk_update`, list-form
+  `insert`) — those raise a clear `TypeError`. Use per-record operations or a
+  column `DEFAULT` instead. Bulk `merge` *is* supported when every row uses
+  the same expression for the same column.
+- The expression text must not contain bind placeholders (`%s`, `?`, `:name`).
+
+#### Legacy backtick form
+
+Backtick-escaped CURRENT keywords in plain strings are still recognized for
+backward compatibility:
+
+```python
 data = {
     "created_at": "`CURRENT TIMESTAMP`",
     "modified_date": "`CURRENT DATE`",
-    "version": "`CURRENT_TIMESTAMP`"
 }
-
-# These are handled specially and not parameterized
-result = db.select(
-    table="audit_log",
-    where={
-        "created_at": {
-            "operator": ">=",
-            "value": "`CURRENT DATE`",
-            "placeholder": "N"
-        }
-    }
-)
 ```
+
+Prefer `Raw` in new code: it is type-safe, works for any expression (not just
+the four CURRENT keywords), and — unlike the string form — cannot be triggered
+by string values arriving in untrusted JSON.
 
 ### Parameter Binding and Security
 
@@ -918,6 +979,16 @@ where = {
     "id": {"NOT IN": [1, 2, 3]}                           # not in
 }
 
+# IN / NOT IN can also be written as logical operators or in comprehensive form:
+where = {"$in": {"category": ["electronics", "gadgets"]}}          # $in operator
+where = {"$nin": {"id": [1, 2, 3]}}                                # $nin operator
+where = {"id": {"operator": "IN", "value": [1, 2, 3], "placeholder": "Y"}}  # comprehensive
+
+# Empty lists are safe: IN [] -> always false, NOT IN [] -> always true.
+# A None member is handled correctly (no NOT-IN-NULL trap):
+where = {"role": {"IN": ["admin", None]}}      # -> (role IN (?) OR role IS NULL)
+where = {"$nin": {"role": ["admin", None]}}    # -> (role NOT IN (?) AND role IS NOT NULL)
+
 # Complex nested conditions
 where = {
     "price": {">=": 50, "<=": 500},                       # Range conditions
@@ -1112,7 +1183,27 @@ elif db.database_type == 'mysql':
 
 ## Error Handling
 
-### Query Error Management
+### The Error Contract
+
+LongJRM is a generic database library, so it follows the Python convention
+(EAFP) used by DB-API 2.0, psycopg, and SQLAlchemy: **operations return a
+result dict on success and raise on failure.**
+
+- **Success** → a result dict with `status: 0` plus `data`/`columns`/`count`
+  (and a `message`). Check `count`/`data`, not `status`, for normal flow.
+- **Operational failure** (DB error, constraint violation, lost connection,
+  bad SQL) → the method **raises**. The original driver exception propagates
+  with its type and traceback intact; do not rely on the return value here.
+- **Misuse / bad arguments** (e.g. invalid columns, empty/missing
+  `key_columns`, a malformed `data`/`conditions` shape) → the method raises a
+  plain `ValueError`/`TypeError` *before* touching the database. These signal a
+  programming error, not a runtime condition to recover from — fix the call.
+
+This is the single contract across the data API. The library deliberately does
+**not** swallow operational errors into a `{"status": -1}` return value —
+returning a sentinel that an unchecked caller reads as success is exactly the
+failure mode exceptions are meant to prevent, and (see below) it silently
+breaks transactions.
 
 ```python
 import logging
@@ -1120,27 +1211,91 @@ from longjrm.database.db import Db
 
 logger = logging.getLogger(__name__)
 
+# Success path: no try/except needed; inspect the result.
+result = db.select(table="users", where={"status": "active"})
+for row in result["data"]:
+    ...
+
+# Failure path: wrap only where YOUR application needs to continue past errors.
 try:
-    result = db.select(
-        table="users",
-        where={"invalid_column": "value"}
-    )
+    db.execute("UPDATE accounts SET balance = balance - %s WHERE id = %s", [100, 7])
 except Exception as e:
-    logger.error(f"Query failed: {e}")
-    # Handle database errors appropriately
-    # - Log the error
-    # - Return default/cached data
-    # - Raise user-friendly exception
+    logger.error(f"Update failed: {e}")
+    # application decides: retry, alert, skip, re-raise, ...
 ```
 
-### Connection Error Handling
+### Errors and Transactions — Important
+
+`pool.transaction()` auto-commits when the block exits normally and
+auto-rolls-back **only when an exception propagates out of the block**. So
+inside a transaction you must let LongJRM's exceptions propagate — if you catch
+an error and keep going, the context manager sees no exception and commits the
+partial work:
 
 ```python
-from longjrm.connection.dbconn import JrmConnectionError
+# CORRECT — a failed statement aborts and rolls back the whole transaction.
+with pool.transaction() as tx:
+    db = get_db(tx.client)
+    db.insert("orders", order)
+    db.update("inventory", {"qty": new_qty}, {"sku": sku})
+    # commit on success; any raised error → rollback
+
+# WRONG — swallowing inside the block defeats atomicity.
+with pool.transaction() as tx:
+    db = get_db(tx.client)
+    try:
+        db.insert("orders", order)      # if this raises and you swallow it...
+    except Exception:
+        pass
+    db.update("inventory", ...)
+    # block exits normally → COMMIT — the half-done work is committed
+```
+
+If you need per-statement recovery, do it *outside* the transaction, or
+re-raise to abort it.
+
+### Streaming Methods Are the Exception
+
+The streaming APIs (`stream_query`, `stream_query_batch`, `stream_insert`,
+`stream_update`, `stream_merge`, `stream_to_csv`) exist to process large data
+sets with **partial-failure tolerance**, so they report per-row / aggregate
+`status` and honor `max_error_count` / `abort_on_error` instead of raising on
+the first bad row. A hard failure (e.g. the connection drops) still raises.
+
+```python
+for row_num, row_data, status in db.stream_query("SELECT * FROM big_table"):
+    if status == 0:
+        process(row_data)
+    else:
+        log_error(f"Row {row_num} failed")   # tolerated up to max_error_count
+```
+
+### Application-Level "Don't Crash the Batch"
+
+Wanting a long-running job to survive one bad statement is a legitimate need —
+but it belongs in the **application/framework layer**, not the library. Wrap the
+call, convert the exception into whatever your app uses (a status record, an
+alert, a skip), and decide whether to continue:
+
+```python
+def run_statement(db, sql, values):
+    try:
+        result = db.execute(sql, values)
+        return {"status": 0, "count": result["count"]}
+    except Exception as e:
+        logger.error(f"Statement failed: {e}")
+        send_alert(...)
+        return {"status": -1, "message": str(e)}   # app's contract, not the library's
+```
+
+### Connection Errors
+
+```python
+from longjrm.connection.connectors import JrmConnectionError
 
 try:
     with pool.client() as client:
-        db = Db(client)
+        db = get_db(client)
         result = db.select(table="users")
 except JrmConnectionError as e:
     logger.error(f"Database connection failed: {e}")
@@ -1331,6 +1486,23 @@ result = db.insert(
     return_columns=["id", "created_at"]
 )
 ```
+
+> **Bulk insert: rows must be uniformly shaped.** A bulk `insert` (list of dicts)
+> builds the column list and placeholders from the **first row**, and binds every
+> row positionally. Pass rows with the **same keys in the same order** — the call
+> does not pre-scan rows for consistency (that overhead isn't worth it for large
+> loads). A wrongly-shaped row usually fails loudly on bind:
+>
+> - **Different column count** → the driver raises on every backend **except
+>   Oracle**, which silently pads the missing column with `NULL` and reports
+>   success. On Oracle, rely on a `NOT NULL` constraint to catch this if it
+>   matters.
+> - **Same count but different/reordered keys** → values bind to the *wrong*
+>   columns. If the swapped values are type-compatible this can succeed silently
+>   on any backend; otherwise the driver raises.
+>
+> In short: keep bulk rows uniform. longjrm makes no cross-row validation
+> guarantee, so a malformed row is the caller's responsibility.
 
 ### Update Operations
 
@@ -1621,15 +1793,51 @@ class Db:
 
 ### Response Format
 
-All database operations return a standardized response:
+On **success**, database operations return a standardized response:
 
 ```python
 {
-    "data": [],        # List of result records (dicts)
-    "columns": [],     # List of column names
-    "count": 0         # Number of records returned
+    "status": 0,       # 0 = success (operations raise on failure; see Error Handling)
+    "message": "...",  # human-readable summary
+    "data": [],        # List of result records (dicts) — query/select
+    "columns": [],     # List of column names — query/select
+    "count": 0         # Rows returned (query/select) or affected (execute/insert/update/...)
 }
 ```
+
+On **failure**, operations raise rather than returning `status: -1` — see
+[The Error Contract](#the-error-contract). Streaming methods are the documented
+exception (per-row / aggregate `status`).
+
+#### `rows_*` count aliases (data-engineering naming)
+
+Alongside the historical count keys, operations also expose the standard
+data-engineering `rows_*` names, so result counts read uniformly across a
+pipeline. The alias is added only when its source key is present:
+
+| Method(s) | Old key (deprecated) | `rows_*` alias |
+|-----------|----------------------|----------------|
+| `query` / `select` | `count` | `rows_read` |
+| `insert` | `count` | `rows_inserted` |
+| `update` / `bulk_update` | `count` | `rows_updated` |
+| `delete` | `count` | `rows_deleted` |
+| `merge` / `merge_select` | `count` | `rows_merged` |
+| `stream_insert` / `stream_merge` | `record_count` / `reject_count` | `rows_read` / `rows_rejected` |
+
+**Migration nudge (non-breaking).** The old keys above still work, but reading one
+now emits a `DeprecationWarning` pointing to its `rows_*` replacement — switch to
+the `rows_*` names; the old keys will be unified away in a future release. Reads of
+the new keys are silent.
+
+```python
+r = db.insert("orders", row)
+r["rows_inserted"]  # 1  -- preferred
+r["count"]          # 1  -- still works, but emits a DeprecationWarning
+```
+
+Not yet aliased and therefore **not** deprecated: `execute`'s affected count, the
+file ops' `row_count`, and the per-row *net* write count on streams
+(`record_count - reject_count`) — deferred until their `rows_*` names land.
 
 ### Condition Formats
 
@@ -1639,6 +1847,6 @@ All database operations return a standardized response:
 
 ### Special Values
 
-- **SQL Keywords**: Use backtick escaping like `"CURRENT TIMESTAMP"`
+- **SQL Expressions**: Use `Raw("CURRENT_TIMESTAMP")` or the `CURRENT_TIMESTAMP` / `CURRENT_DATE` constants (legacy backtick strings like `` "`CURRENT TIMESTAMP`" `` still work)
 - **Parameter Binding**: Controlled via `placeholder` option ("Y" = bind, "N" = direct)
 - **Data Types**: Automatic JSON, datetime, and array handling

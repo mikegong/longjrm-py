@@ -92,8 +92,10 @@ def dsn_to_parts(dsn: str) -> Dict[str, Any]:
             out["type"] = "sqlite"
             out["database"] = f"file:{u.path}"
         else:
-            # Drop leading "/" added by urlparse for absolute paths
-            db = u.path.lstrip("/")
+            # Drop only the separator slash added by urlparse:
+            # sqlite:///rel.db -> 'rel.db', sqlite:////abs/p.db -> '/abs/p.db'.
+            # lstrip would erase the root of absolute POSIX paths.
+            db = u.path[1:] if u.path.startswith("/") else u.path
             out["database"] = db
         return out
 

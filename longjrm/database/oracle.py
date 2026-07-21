@@ -10,7 +10,12 @@ class OracleDb(Db):
     """
     Oracle database implementation.
     """
-    
+
+    # merge_select(): Oracle uses MERGE INTO ... USING (SELECT ...); Oracle does
+    # not accept an AS keyword on the table/source aliases.
+    _merge_select_style = 'merge_into'
+    _merge_select_use_as = False
+
     def __init__(self, client):
         super().__init__(client)
         # Oracle uses :key or :1, :2 placeholders. 
@@ -59,20 +64,18 @@ class OracleDb(Db):
         
         sql = f"INSERT INTO {table} ({str_col}) VALUES ({str_qm})"
 
-        # Validate consistency to fail fast and match expected behavior
-        # (This avoids driver errors when binding mismatched values)
-        keys_set = set(columns)
-        for i, row in enumerate(data_list):
-            if set(row.keys()) != keys_set:
-                raise ValueError(f"Inconsistent columns at row {i}")
-
+        # Columns come from the first row; rows are bound positionally. No
+        # per-row consistency pre-scan -- the driver raises on a mismatched bind
+        # (see Db._bulk_insert).
         total_affected = 0
         cur = None
         try:
             cur = self.get_cursor()
             
-            # datalist_to_dataseq handles value serialization
-            for batch in data_utils.datalist_to_dataseq(data_list, bulk_size=bulk_size):
+            # process_value_fn keeps bulk inserts serializing values exactly
+            # like single-row inserts (lists -> JSON, datetimes passed natively)
+            for batch in data_utils.datalist_to_dataseq(
+                    data_list, bulk_size=bulk_size, process_value_fn=self._process_value):
                 cur.executemany(sql, batch)
                 if cur.rowcount > 0:
                     total_affected += cur.rowcount
@@ -82,9 +85,8 @@ class OracleDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_affected}
             
         except Exception as e:
-            message = f'Failed to execute bulk insert: {e}'
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message}
+            logger.error(f'Failed to execute bulk insert: {e}', exc_info=True)
+            raise
 
         finally:
             if cur:
@@ -124,27 +126,20 @@ class OracleDb(Db):
         """
         if arr_values is None:
             arr_values = []
-            
-        # First, ensure placeholders and current keywords are handled standardly
-        # Base Db handles processing values, but we need to intercept SQL structure
-        
-        # We process values first to get the clean list
+
         processed_values = []
         if arr_values:
-            # Re-implement basics of base _prepare_sql but target Oracle style
-            
-            # 1. Convert any named placeholders to positional if present (generic logic)
-            # But standard Db logic uses %s. We assume input SQL uses %s.
-            
-            # Check for generic named params if used? Typically we standardize on %s internally.
-            # Assuming input is standard %s style from internal constructors.
-            
-            # 2. Inject current time keywords
+            # 1. Normalize positional placeholders to the internal %s style FIRST.
+            #    Callers (and the framework itself, e.g. job.py windowing) use the
+            #    standard '?' qmark; without this normalization '?' is left untouched
+            #    and Oracle's driver reports zero binds for N provided values
+            #    (DPY-4009). A query already written with %s is left unchanged.
+            sql, arr_values = self.placeholder_handler.convert_to_positional(sql, arr_values, '%s')
+
+            # 2. Inject current-time keywords (operates on the %s form).
             sql, processed_values = sql_utils.inject_current(sql, arr_values, '%s')
-            
-            # 3. Convert all %s to :1, :2, :3...
-            # We can use a regex sub with a counter
-            
+
+            # 3. Convert all %s to Oracle's positional :1, :2, :3 ... binds.
             parts = sql.split('%s')
             if len(parts) > 1:
                 new_sql = ""
@@ -152,7 +147,7 @@ class OracleDb(Db):
                     new_sql += f"{part}:{i+1}"
                 new_sql += parts[-1]
                 sql = new_sql
-                
+
         else:
             processed_values = arr_values
 
@@ -172,10 +167,16 @@ class OracleDb(Db):
         """
         raise NotImplementedError("Oracle does not support INSERT ... ON CONFLICT syntax. Use merge() method instead.")
 
-    def merge(self, table, data, key_columns, column_meta=None, update_columns=None, no_update='N', bulk_size=0):
+    def merge(self, table, data, key_columns, no_update=None, *, update_columns=None):
         """
         Merge (Upsert) data into table for Oracle using MERGE INTO.
+
+        Mirrors the base ``merge(table, data, key_columns, no_update)``
+        signature (async delegation passes ``no_update`` positionally);
+        ``update_columns`` is an Oracle-specific keyword-only extra.
         """
+        no_update = self._no_update_flag(no_update)
+
         if not data:
             return {"status": 0, "message": "No data to merge", "data": [], "count": 0}
 
@@ -220,11 +221,18 @@ class OracleDb(Db):
         source_select_parts = []
         bind_index = 1
         
+        # The first row determines which columns are SQL expressions (Raw or
+        # backtick CURRENT keywords); those columns are inlined for every row.
         for k in data_keys:
             val = first_row.get(k)
-            if isinstance(val, str) and val.startswith('`') and val.endswith('`'):
-                # Raw SQL: inject directly (stripped of backticks)
-                raw_sql = val[1:-1]
+            if isinstance(val, sql_utils.Raw):
+                # Trusted SQL expression: rendered verbatim, never bound.
+                source_select_parts.append(f"{val.text} AS {k}")
+            elif isinstance(val, str) and sql_utils.check_current_keyword(val):
+                # Only the backtick-escaped CURRENT keywords are emitted as raw
+                # SQL (consistent with the rest of the library); arbitrary
+                # backtick-wrapped strings are bound like any other value.
+                raw_sql = sql_utils.unescape_current_keyword(val)
                 source_select_parts.append(f"{raw_sql} AS {k}")
             else:
                 # Normal bind: use placeholder
@@ -239,8 +247,8 @@ class OracleDb(Db):
         USING ({source_select}) source
         ON ({match_str})
         """
-        
-        if no_update != 'Y' and update_set_str:
+
+        if not no_update and update_set_str:
             sql += f" WHEN MATCHED THEN UPDATE SET {update_set_str}"
             
         sql += f" WHEN NOT MATCHED THEN INSERT ({insert_cols_str}) VALUES ({insert_vals_str})"
@@ -271,9 +279,8 @@ class OracleDb(Db):
             return {"status": 0, "message": message, "data": [], "count": total_affected}
             
         except Exception as e:
-            message = f"Failed to merge Oracle: {e}"
-            logger.error(message, exc_info=True)
-            return {"status": -1, "message": message}
+            logger.error(f"Failed to merge Oracle: {e}", exc_info=True)
+            raise
         finally:
             if cur:
                 cur.close()

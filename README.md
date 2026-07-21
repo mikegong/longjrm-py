@@ -61,6 +61,7 @@ This innovative approach circumvents the limitations often encountered with trad
 ## Advanced Features
 
 - **Placeholder Support**: Supports both positional (`%s`, `?`) and named placeholders (`:name`, `%(name)s`, `$name`) with automatic detection and conversion
+- **SQL Expressions**: Type-safe `Raw` sentinel for server-side expressions — `from longjrm import Raw, CURRENT_TIMESTAMP` — rendered into SQL at construction time; untrusted JSON can never produce one
 
 ## Architecture
 
@@ -226,6 +227,24 @@ Create database configuration files in JSON format:
 }
 ```
 
+#### `jrm.config.json` vs `dbinfos.json`
+
+File-based configuration uses **two files with distinct roles** (both optional — you can use either or both):
+
+| File | Role | Shape |
+|------|------|-------|
+| `jrm.config.json` | Application settings: `default_db` and pool tuning (`jrm_max_conn_pool_size`, `jrm_connect_timeout`, etc.), plus an optional nested `databases` block | Wrapper object; databases live under a `"databases"` key |
+| `dbinfos.json` | A catalog of database connections — nothing else | Flat `{ "db-name": { ...connection... } }` map (the example above) |
+
+How they combine in `JrmConfig.from_files(config_path, dbinfos_path)`:
+
+- **Database definitions are merged**: entries from `dbinfos.json` are applied first, then `jrm.config.json`'s `databases` block — so on a key conflict, **`jrm.config.json` wins**.
+- **`default_db` and pool tuning come only from `jrm.config.json`.** `dbinfos.json` contributes database entries only.
+
+`jrm.config.json` can be used on its own (put your databases under its `databases` key). `dbinfos.json` can supply databases on its own too, but then `default_db` and pool settings fall back to defaults. At least one database must be defined across the files, or loading raises a configuration error.
+
+See [docs/config.md](docs/config.md) for the full configuration reference.
+
 ## Usage
 
 ### Runtime Configuration Usage
@@ -317,6 +336,42 @@ with pool.client() as client:
     # Insert
     db.insert("users", {"name": "Alice", "active": True})
 ```
+
+### WHERE Conditions
+
+`where` accepts JSON-style conditions. Multiple keys are AND-ed together:
+
+```python
+# Simple equality (AND-ed)
+db.select("users", where={"status": "active", "department": "Engineering"})
+
+# Operators (per-column)
+db.select("users", where={"age": {">=": 18, "<": 65}, "status": {"!=": "banned"}})
+
+# IN / NOT IN — several equivalent forms
+db.select("users", where={"role": {"IN": ["admin", "editor"]}})
+db.select("users", where={"id":   {"NOT IN": [1, 2, 3]}})
+db.select("users", where={"$in":  {"role": ["admin", "editor"]}})
+db.select("users", where={"$nin": {"id": [1, 2, 3]}})
+#   Empty lists are safe: IN [] is always false, NOT IN [] is always true.
+
+# NULL handling — None becomes proper IS [NOT] NULL, never `= NULL`
+db.select("users", where={"deleted_at": None})          # deleted_at IS NULL
+db.select("users", where={"deleted_at": {"!=": None}})  # deleted_at IS NOT NULL
+db.select("users", where={"role": {"IN": ["admin", None]}})  # role IN (?) OR role IS NULL
+
+# Logical operators
+db.select("users", where={"$or": [{"status": "active"}, {"role": "admin"}]})
+
+# SQL expressions as values (rendered into SQL, never bound) — see below
+from longjrm import Raw, CURRENT_DATE
+db.select("events", where={"created_at": {">=": Raw("CURRENT_DATE - 7")}})
+```
+
+Values are parameter-bound by default. Only `=`/`==` and `!=`/`<>` are defined
+against `None`; any other operator with `None` raises `ValueError`. See
+[docs/database.md](docs/database.md#where-conditions) for the full condition
+reference (comprehensive form, inline/`dynamic_param`, all operators).
 
 ### Streaming Export
 
@@ -723,7 +778,7 @@ longjrm/
 The `Db` class provides JSON-based CRUD operations with:
 - JSON data format for column-value pairs
 - Dynamic SQL generation with proper escaping
-- Support for SQL CURRENT keywords with backtick escaping
+- SQL expressions as values via the `Raw` sentinel (`from longjrm import Raw, CURRENT_TIMESTAMP`); legacy backtick CURRENT-keyword strings still supported
 - Placeholder handling varies by database library (`%s` for dbutils, `?` for others)
 
 ### ABC Interface Pattern
@@ -840,5 +895,17 @@ This project is licensed under the [Apache License 2.0](LICENSE).
 Developed by Mike Gong at LONGINFO.
 
 ## Documentation
+
+- [docs/database.md](docs/database.md) — full CRUD / select / streaming guide,
+  and **[The Error Contract](docs/database.md#the-error-contract)** (when methods
+  return a result dict vs. raise, the transaction interaction, and the streaming
+  exception).
+- [docs/transaction-management.md](docs/transaction-management.md) — transactions and isolation.
+- [docs/config.md](docs/config.md) — configuration and pooling.
+- [docs/spark.md](docs/spark.md) — Spark backend notes.
+
+**Error handling in one line:** operations return a result dict on success
+(`status: 0`) and **raise** on failure — wrap calls only where your application
+must continue past an error. See the error contract above for the full rules.
 
 All the documentation was compiled with assistance from Gemini 3 Pro, Claude Opus 4.5, and Claude Sonnet 4.

@@ -169,8 +169,10 @@ class AsyncDb:
 
     async def merge(self, table, data, key_columns, no_update=None):
         async with self._lock:
+            # Keyword form so the flag can never bind to a backend-specific
+            # positional extra if an override ever diverges from the base.
             return await asyncio.to_thread(
-                self._sync.merge, table, data, key_columns, no_update
+                self._sync.merge, table, data, key_columns, no_update=no_update
             )
 
     # ------------------------------------------------------------------
@@ -192,6 +194,8 @@ class AsyncDb:
         conditions=None,
         source_select=None,
         update_columns=None,
+        isolation_clause='',
+        dynamic_param='Y',
     ):
         async with self._lock:
             return await asyncio.to_thread(
@@ -204,6 +208,8 @@ class AsyncDb:
                 conditions,
                 source_select,
                 update_columns,
+                isolation_clause,
+                dynamic_param,
             )
 
     async def bulk_load(self, table, load_info=None, *, command=None):
@@ -247,6 +253,15 @@ class AsyncDb:
         gen = self._sync.stream_query_batch(
             sql, arr_values, batch_size=batch_size, max_error_count=max_error_count
         )
+        return _AsyncGenAdapter(gen, self._lock)
+
+    def stream_select(self, table, columns=None, where=None, options=None, *, max_error_count=0) -> _AsyncGenAdapter:
+        """Async-iterate a SELECT without buffering -- the streaming counterpart of
+        select(). Same SQL as select() (data_fetch_limit default applies; pass
+        options={"limit": 0} to stream all). Yields (row_number, row_dict, status)."""
+        gen = self._sync.stream_select(
+            table, columns=columns, where=where, options=options,
+            max_error_count=max_error_count)
         return _AsyncGenAdapter(gen, self._lock)
 
     # ------------------------------------------------------------------
