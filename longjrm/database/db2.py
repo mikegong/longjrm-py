@@ -38,6 +38,16 @@ class Db2Db(Db):
         """Db2 supports returning columns via SELECT ... FROM FINAL TABLE (INSERT ...)"""
         return True
     
+    def _construct_select_sql(self, table, str_column, str_where, str_order, limit):
+        """
+        Override to use FETCH FIRST syntax for Db2 (LIMIT is not standard Db2 SQL).
+        """
+        str_limit = ''
+        if limit and limit > 0:
+            str_limit = f" FETCH FIRST {limit} ROWS ONLY"
+
+        return f"select {str_column} from {table}{str_where}{str_order}{str_limit}"
+
     def _construct_insert_sql(self, table, str_col, values_sql, return_columns):
         """
         Db2 wrap syntax for returning columns: SELECT ... FROM FINAL TABLE (INSERT ...)
