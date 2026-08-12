@@ -164,6 +164,32 @@ def escape_csv_row(values, null_value='', quotechar=None):
 # Database Data Transformation Functions
 # =============================================================================
 
+def serialize_datetime(value):
+    """Serialize a ``datetime.datetime`` for binding as a SQL value.
+
+    An **aware** datetime denotes an instant, and the offset is the only part
+    of it the database cannot reconstruct on its own. Serializing it without
+    the offset does not fail loudly -- the server reads the wall-clock digits
+    in its own session time zone and stores a different instant, silently. So
+    aware values are emitted in ISO 8601 with their offset
+    (``2026-08-12 11:26:53.525447+00:00``), which every supported dialect
+    parses back to the same instant regardless of session settings.
+
+    **Naive** datetimes keep the historical ``%Y-%m-%d %H:%M:%S.%f`` form.
+    They carry no offset to preserve, so there is nothing to fix and no reason
+    to change what already works for existing callers.
+
+    Args:
+        value: a ``datetime.datetime`` (aware or naive)
+
+    Returns:
+        str: the value in a form the target database parses unambiguously
+    """
+    if value.tzinfo is not None and value.utcoffset() is not None:
+        return value.isoformat(sep=' ')
+    return value.strftime('%Y-%m-%d %H:%M:%S.%f')
+
+
 def datalist_to_dataseq(datalist, bulk_size=0, check_current_fn=None, unescape_current_fn=None,
                         process_value_fn=None):
     """
@@ -210,7 +236,7 @@ def datalist_to_dataseq(datalist, bulk_size=0, check_current_fn=None, unescape_c
             elif isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
                 data_value = str(value)
             elif isinstance(value, datetime.datetime):
-                data_value = datetime.datetime.strftime(value, '%Y-%m-%d %H:%M:%S.%f')
+                data_value = serialize_datetime(value)
             elif isinstance(value, str):
                 # Handle CURRENT SQL keywords if check function provided
                 if check_current_fn and check_current_fn(value):

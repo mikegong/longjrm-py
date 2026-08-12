@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Time-zone-aware datetimes lost their offset on the write path, silently shifting the stored instant.** `Db._process_value` and the bulk converter in `datalist_to_dataseq` serialized every datetime with `strftime('%Y-%m-%d %H:%M:%S.%f')` — a format with no offset field — so an aware value bound to a `TIMESTAMPTZ` / `timestamp with time zone` column arrived as bare wall-clock digits and the server re-read them in its **session** time zone. Nothing raised: a UTC value written to a session running `Asia/Shanghai` was stored 8 hours off, and only a comparison against a server-side `NOW()` revealed it. Aware values are now emitted in ISO 8601 with their offset (`2026-08-12 11:26:53.525447+00:00`), which every supported dialect parses back to the same instant regardless of session settings; the shared helper is `longjrm.utils.data.serialize_datetime`. The same fix lands on the Spark literal builder (`_prepare_sql`), which additionally dropped sub-second precision for aware and naive values alike — it now keeps both. **Naive datetimes are untouched** (they carry no offset to preserve, so the historical format stays), and `datetime.date` is unaffected. Oracle already passed datetimes to the driver natively and was never affected; the same is true of WHERE-clause values on all backends, which are bound rather than serialized — that asymmetry is what made the bug hard to see, since filtering on an aware datetime always worked.
+
 ### Changed
 
 - **Consistent error contract: data methods now raise on failure instead of returning `{"status": -1}`** (BREAKING). Methods that previously caught operational errors and returned a `{"status": -1, "message": ...}` dict now log and re-raise. The single contract is now: **success → result dict with `status: 0`; operational failure → raise the driver exception; misuse (bad arguments) → raise `ValueError`/`TypeError`.** This spans:

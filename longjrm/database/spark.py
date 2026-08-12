@@ -10,7 +10,7 @@ import logging
 import json
 from datetime import datetime
 from longjrm.database.db import Db, rows_alias
-from longjrm.utils import sql as sql_utils
+from longjrm.utils import sql as sql_utils, data as data_utils
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,11 @@ class SparkDb(Db):
             elif isinstance(val, (int, float)):
                 return str(val)
             elif isinstance(val, datetime):
-                return f"TIMESTAMP '{val.strftime('%Y-%m-%d %H:%M:%S')}'"
+                # Aware values keep their UTC offset: Spark parses an ISO-8601
+                # timestamp literal with offset and normalizes it to the session
+                # zone, so the instant survives. Dropping the offset would hand
+                # Spark the wall-clock digits and let it read them as local time.
+                return f"TIMESTAMP '{data_utils.serialize_datetime(val)}'"
             elif isinstance(val, (dict, list)):
                 json_str = json.dumps(val, ensure_ascii=False).replace("'", "''")
                 return f"'{json_str}'"

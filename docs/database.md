@@ -649,6 +649,25 @@ user_data = {
 result = db.select(table="users", where={"id": 123})
 ```
 
+#### Datetimes and time zones
+
+A **timezone-aware** datetime is written with its UTC offset, so it lands on the
+same instant no matter what time zone the database session is running in:
+
+```python
+from datetime import datetime, timezone
+
+db.insert("events", {"id": 1, "ts": datetime.now(timezone.utc)})
+# bound as '2026-08-12 11:26:53.525447+00:00'
+```
+
+A **naive** datetime has no offset to carry, so it is written as plain
+`YYYY-MM-DD HH:MM:SS.ffffff` and the server interprets it in the session time
+zone. That is the right behavior for `TIMESTAMP` columns and the wrong one for
+`TIMESTAMPTZ`: **if the column stores an instant, pass an aware datetime.**
+Mixing the two writes values that differ by the session offset with no error
+anywhere.
+
 ### SQL Expressions and Keywords (`Raw`)
 
 To pass a SQL expression (rather than data) as a value, wrap it in `Raw` — or

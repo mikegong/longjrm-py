@@ -868,7 +868,10 @@ class Db(ABC):
                 return value
         elif isinstance(value, datetime.datetime):
             # Must be checked before datetime.date: datetime is a date subclass.
-            return datetime.datetime.strftime(value, '%Y-%m-%d %H:%M:%S.%f')
+            # Aware values keep their UTC offset -- dropping it makes the server
+            # read the digits in its own session time zone and store a different
+            # instant, with no error anywhere. See data_utils.serialize_datetime.
+            return data_utils.serialize_datetime(value)
         elif isinstance(value, datetime.date):
             return str(value)
         elif isinstance(value, str):
