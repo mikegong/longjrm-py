@@ -73,6 +73,11 @@ class RawClassTests(unittest.TestCase):
         self.assertEqual(repr(Raw("NOW()")), "Raw('NOW()')")
         self.assertEqual(Raw(Raw("NOW()")).text, "NOW()")
 
+    def test_str_is_the_sql_text(self):
+        """A Raw interpolated into hand-built SQL must render as the expression."""
+        self.assertEqual(str(Raw("NOW()")), "NOW()")
+        self.assertEqual(f"ts <= {CURRENT_DATE}", "ts <= CURRENT_DATE")
+
     def test_constants(self):
         self.assertEqual(CURRENT_TIMESTAMP.text, "CURRENT_TIMESTAMP")
         self.assertEqual(CURRENT_DATE.text, "CURRENT_DATE")
