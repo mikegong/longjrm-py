@@ -346,6 +346,18 @@ class Db2Db(Db):
                                 m_msg = load_message.get('MSG') or load_message.get('msg')
                                 msg_result_text = msg_result_text + f'\nSQLCODE: {m_sqlcode}, MSG: {m_msg}'
                                 logger.info(f"SQLCODE: {m_sqlcode}, MSG: {m_msg}")
+                                # A LOAD whose input never opened (bad path / pipe /
+                                # device) still hands back a counts row of ZEROS, and
+                                # zeros with no rejects read as success above. The
+                                # utility's message suffix carries no severity
+                                # (SQL3109N "beginning to load" is informational), so
+                                # the codes meaning "input never opened" are named:
+                                # nothing was read because nothing COULD be, which is
+                                # not an empty load.
+                                if str(m_sqlcode).strip().upper() in ('SQL2036N', 'SQL2037N', 'SQL3025N'):
+                                    status = -1
+                                    message = f"LOAD input could not be opened: {m_msg}"
+                                    logger.error(message)
                             message = f"{message} \n\n {msg_result_text}"
                         else:
                             logger.error(f"Failed to get ADMIN_CMD message: {msg_result['message']}")
