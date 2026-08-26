@@ -237,7 +237,15 @@ class Db2Db(Db):
         final_load_info = load_info.copy()
         if table and 'target' not in final_load_info:
             final_load_info['target'] = table
-            
+
+        # Accept the neutral 'source_type' the sibling drivers speak ('file'/'cursor'),
+        # translated to DB2's filetype (DEL/CURSOR) -- so one calling vocabulary works
+        # against every engine. An explicit filetype still wins: it can also say IXF/ASC,
+        # which the neutral word cannot.
+        if 'filetype' not in final_load_info and 'source_type' in final_load_info:
+            kind = str(final_load_info.pop('source_type')).lower()
+            final_load_info['filetype'] = 'CURSOR' if kind == 'cursor' else 'DEL'
+
         return self.load_admin_cmd(final_load_info)
 
     def load_admin_cmd(self, load_info=None, load_cmd=''):

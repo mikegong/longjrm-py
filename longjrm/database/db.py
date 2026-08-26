@@ -232,23 +232,124 @@ class Db(ABC):
 
     def bulk_load(self, table, load_info=None, *, command=None):
         """
-        Bulk load data into table using database-specific high-performance method.
-        
+        Bulk load data into table.
+
+        Engine subclasses override this with their fastest native channel (DB2 via the
+        ADMIN_CMD stored procedure, Postgres via COPY, MySQL via LOAD DATA). This base
+        implementation is the FALLBACK that makes every engine bulk-loadable with no
+        external dependency -- the same principle as DB2 going through a stored
+        procedure instead of the load utility: everything happens through the driver,
+        like SQL. A query source becomes one in-engine INSERT INTO ... SELECT; a file
+        source is parsed client-side and written in array-bound executemany batches,
+        the standard high-performance path for engines (Oracle, SQL Server) whose
+        native bulk channels want server-side files or external utilities.
+
         Args:
-            table: Target table name
-            load_info: Data source or configuration (used if command is not provided).
-                Can be:
-                - Config dictionary (RECOMMENDED): {'source': '...', 'delimiter': ',', ...}
-                - Source string: File path or SQL query (uses default options)
-            command: Optional raw database-specific bulk load command. If provided,
-                it takes precedence over load_info.
-        Raises:
-            NotImplementedError: If the database does not support bulk loading
+            table: Target table name, e.g. "my_table". Also supports
+                "my_table(col1, col2)" naming the columns to load into.
+            load_info: Config dictionary:
+                - source: 'file path' or 'SELECT query' (required)
+                - source_type: 'file' | 'cursor' (auto-detected when omitted)
+                - columns: List of target columns (alternative to the table(...) form)
+                - delimiter: Field delimiter (default ',')
+                - quote: Quote character (default '"')
+                - encoding: File encoding (default 'utf-8')
+                - header: True when the file's first line is column names; it is
+                  skipped, and used as the column list if none was given
+                - null_value: The string that means NULL (default '': what
+                  stream_to_csv writes for None)
+                - bulk_size: Rows per executemany batch (default 10000)
+            command: Optional raw engine-specific command (executed verbatim,
+                bypassing load_info).
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support bulk_load(). "
-            f"Use insert() with a list for batch operations instead."
-        )
+        import csv
+
+        if command:
+            return self.execute(command)
+        if not isinstance(load_info, dict):
+            raise TypeError(
+                f"bulk_load requires a configuration dictionary for 'load_info', "
+                f"got {type(load_info).__name__}")
+
+        columns = load_info.get('columns')
+        if table and '(' in str(table):
+            t_parts = table.split('(', 1)
+            table = t_parts[0].strip()
+            if not columns:
+                columns = [c.strip() for c in t_parts[1].rstrip(')').split(',')]
+
+        source = load_info.get('source')
+        source_type = load_info.get('source_type')
+        if source_type is None:
+            if isinstance(source, str):
+                upper_src = source.strip().upper()
+                source_type = 'cursor' if upper_src.startswith(('SELECT', '(SELECT'))                     else 'file'
+            else:
+                source_type = 'file'          # a file-like object
+
+        if source_type == 'cursor':
+            # One statement inside the engine; requires the source to be readable on
+            # THIS connection (same database, or a federated table making it look so).
+            col_clause = f" ({', '.join(columns)})" if columns else ""
+            return self.execute(f"INSERT INTO {table}{col_clause} {source}")
+
+        if source_type != 'file':
+            raise ValueError(f"Unknown source_type: {source_type}")
+
+        delimiter = load_info.get('delimiter', ',')
+        quote = load_info.get('quote', '"')
+        null_value = load_info.get('null_value', '')
+        bulk_size = int(load_info.get('bulk_size', 10000))
+        has_header = bool(load_info.get('header', False))
+
+        def _rows(reader):
+            for raw in reader:
+                if not raw:
+                    continue                   # a blank line is not a row of NULLs
+                yield [None if v == null_value else v for v in raw]
+
+        file_handle = None
+        try:
+            if isinstance(source, str):
+                file_handle = open(source, 'r', newline='',
+                                   encoding=load_info.get('encoding', 'utf-8'))
+                stream = file_handle
+            else:
+                stream = source
+            reader = csv.reader(stream, delimiter=delimiter, quotechar=quote)
+
+            if has_header:
+                header_row = next(reader, None)
+                if columns is None and header_row:
+                    columns = [c.strip() for c in header_row]
+            if not columns:
+                raise ValueError(
+                    "bulk_load from a file needs the target columns: pass 'columns', "
+                    "use the table(col, ...) form, or set header=True on a file whose "
+                    "first line names them")
+
+            total = 0
+            batch = []
+            for values in _rows(reader):
+                batch.append(dict(zip(columns, values)))
+                if len(batch) >= bulk_size:
+                    result = self.insert(table, batch)
+                    if result.get('status', 0) != 0:
+                        return result
+                    total += len(batch)
+                    batch = []
+            if batch:
+                result = self.insert(table, batch)
+                if result.get('status', 0) != 0:
+                    return result
+                total += len(batch)
+
+            message = f"Bulk load to {table} completed. {total} rows loaded."
+            logger.info(message)
+            return {"status": 0, "message": message, "data": [], "count": total}
+        finally:
+            if file_handle:
+                file_handle.close()
 
     def select(self, table, columns=None, where=None, options=None):
         """
