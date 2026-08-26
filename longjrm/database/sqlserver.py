@@ -46,6 +46,85 @@ class SqlServerDb(Db):
         """
         return True
 
+    def bulk_load(self, table, load_info=None, *, command=None):
+        """Bulk load into SQL Server -- pure SQL / pure driver, no external utility.
+
+        SQL Server's famous loader is bcp, an external program, and its in-engine
+        statements (BULK INSERT, OPENROWSET(BULK ...)) read the file on the SERVER,
+        which needs the file to live there and the caller to hold ADMINISTER BULK
+        OPERATIONS. Neither is something a driver can assume. What it can always reach:
+
+          cursor source -> INSERT INTO t (cols) SELECT ...      (one in-engine statement)
+          file source   -> parameter-array binding via pyodbc's fast_executemany, which
+                           sends a whole batch in one round trip instead of a statement
+                           per row
+
+        fast_executemany is the same trade Oracle's APPEND_VALUES makes: the fast write
+        belongs to the driver, so it works wherever the connection does -- no server-side
+        path, no extra permission.
+
+        A deployment whose server CAN read the file gets the last increment through the
+        ``command`` escape hatch, e.g.
+        ``bulk_load(t, command="BULK INSERT t FROM '\\\\share\\f.csv' WITH (FORMAT='CSV')")``.
+
+        load_info keys are the shared vocabulary (see Db.bulk_load): source, source_type,
+        columns, delimiter, quote, encoding, header, null_value, bulk_size.
+        """
+        if command:
+            logger.info(f"SQL Server bulk_load executing raw command: {command}")
+            return self.execute(command)
+        if not isinstance(load_info, dict):
+            raise TypeError(
+                f"SQL Server bulk_load requires a configuration dictionary for "
+                f"'load_info', got {type(load_info).__name__}")
+
+        columns = load_info.get('columns')
+        target = table
+        if table and '(' in str(table):
+            t_parts = table.split('(', 1)
+            target = t_parts[0].strip()
+            if not columns:
+                columns = [c.strip() for c in t_parts[1].rstrip(')').split(',')]
+
+        source = load_info.get('source')
+        source_type = load_info.get('source_type')
+        if source_type is None and isinstance(source, str):
+            source_type = 'cursor' if source.strip().upper().startswith(('SELECT', '(SELECT')) \
+                else 'file'
+
+        if source_type == 'cursor':
+            col_clause = f" ({', '.join(columns)})" if columns else ""
+            logger.info(f"SQL Server bulk load into {target} from a query")
+            return self.execute(f"INSERT INTO {target}{col_clause} {source}")
+
+        # File source: the base class owns the parsing (and the shared option names);
+        # only the write is ours, through the _write_batch seam.
+        def _array_bind(rows):
+            cols = list(rows[0].keys())
+            binds = ', '.join('?' for _ in cols)
+            sql = f"INSERT INTO {target} ({', '.join(cols)}) VALUES ({binds})"
+            cur = None
+            try:
+                cur = self.get_cursor()
+                # The whole point: without it pyodbc sends one statement per row.
+                cur.fast_executemany = True
+                cur.executemany(sql, [[self._process_value(r[c]) for c in cols]
+                                      for r in rows])
+                if not getattr(self.conn, 'autocommit', False):
+                    self.conn.commit()
+                return {"status": 0, "message": f"{len(rows)} rows loaded",
+                        "data": [], "count": len(rows)}
+            except Exception as e:
+                logger.error(f"SQL Server bulk load into {target} failed: {e}",
+                             exc_info=True)
+                return {"status": -1, "message": str(e), "data": [], "count": 0}
+            finally:
+                if cur:
+                    cur.close()
+
+        logger.info(f"SQL Server bulk load into {target} from a file")
+        return super().bulk_load(table, dict(load_info, _write_batch=_array_bind))
+
     def _build_upsert_clause(self, key_columns, update_columns, for_values=True):
         """
         SQL Server does not support ON CONFLICT. It requires MERGE.
