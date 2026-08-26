@@ -307,9 +307,14 @@ class Db(ABC):
         # For an engine without a native channel this IS its bulk path, so INFO, not a
         # warning -- a warning belongs to the anomaly case, where a native channel was
         # expected and refused (see mysql.bulk_load's LOCAL INFILE retry).
-        logger.info(f"Generic bulk load into {table}: client-side parse + array-bound "
-                    f"executemany batches ({self.__class__.__name__} has no native "
-                    f"channel or was asked to fall back)")
+        #
+        # A driver may also be here only for the file handling, having supplied its own
+        # fast write through _write_batch (Oracle's direct path does). Say which, or the
+        # log claims a slow route that is not being taken.
+        route = ("client-side parse, driver-supplied batch write"
+                 if load_info.get('_write_batch')
+                 else "client-side parse + array-bound executemany batches")
+        logger.info(f"Bulk load into {table}: {route} ({self.__class__.__name__})")
 
         def _rows(reader):
             for raw in reader:
@@ -337,18 +342,23 @@ class Db(ABC):
                     "use the table(col, ...) form, or set header=True on a file whose "
                     "first line names them")
 
+            # write_batch is the seam a driver overrides to keep this file handling and
+            # substitute its own fast write (Oracle's direct-path INSERT, say).
+            write_batch = load_info.get('_write_batch') or (
+                lambda rows: self.insert(table, rows))
+
             total = 0
             batch = []
             for values in _rows(reader):
                 batch.append(dict(zip(columns, values)))
                 if len(batch) >= bulk_size:
-                    result = self.insert(table, batch)
+                    result = write_batch(batch)
                     if result.get('status', 0) != 0:
                         return result
                     total += len(batch)
                     batch = []
             if batch:
-                result = self.insert(table, batch)
+                result = write_batch(batch)
                 if result.get('status', 0) != 0:
                     return result
                 total += len(batch)

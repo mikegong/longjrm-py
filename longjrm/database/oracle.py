@@ -102,6 +102,85 @@ class OracleDb(Db):
             
         return f"select {str_column} from {table}{str_where}{str_order}{str_limit}"
 
+    def bulk_load(self, table, load_info=None, *, command=None):
+        """Bulk load into Oracle by DIRECT PATH -- pure SQL, no external utility.
+
+        Oracle's fast loader is famously sqlldr, an external program, and its external
+        tables want the file sitting on the database server behind a DIRECTORY object.
+        Neither is usable from a driver. The direct path itself, though, is reachable
+        from plain SQL through a hint, and that is what this uses:
+
+          cursor source -> INSERT /*+ APPEND */ INTO t (cols) SELECT ...
+          file source   -> INSERT /*+ APPEND_VALUES */ INTO t (cols) VALUES (:1, :2, ...)
+                           with array binds, one round trip per batch
+
+        Both write above the table's high-water mark, bypassing the buffer cache and
+        the row-by-row insert path -- the same mechanism sqlldr's direct path uses,
+        asked for in SQL instead of on a command line. The cost is the semantics that
+        come with it: the load takes an exclusive lock on the table until commit, and
+        it only ever APPENDS. That suits a bulk load and rules out an upsert, which is
+        the same boundary every other engine's load channel has.
+
+        load_info keys are the shared vocabulary (see Db.bulk_load): source,
+        source_type, columns, delimiter, quote, encoding, header, null_value,
+        bulk_size.
+        """
+        if command:
+            return self.execute(command)
+        if not isinstance(load_info, dict):
+            raise TypeError(
+                f"Oracle bulk_load requires a configuration dictionary for 'load_info', "
+                f"got {type(load_info).__name__}")
+
+        columns = load_info.get('columns')
+        target = table
+        if table and '(' in str(table):
+            t_parts = table.split('(', 1)
+            target = t_parts[0].strip()
+            if not columns:
+                columns = [c.strip() for c in t_parts[1].rstrip(')').split(',')]
+
+        source = load_info.get('source')
+        source_type = load_info.get('source_type')
+        if source_type is None and isinstance(source, str):
+            source_type = 'cursor' if source.strip().upper().startswith(('SELECT', '(SELECT')) \
+                else 'file'
+
+        if source_type == 'cursor':
+            col_clause = f" ({', '.join(columns)})" if columns else ""
+            sql = f"INSERT /*+ APPEND */ INTO {target}{col_clause} {source}"
+            logger.info(f"Oracle direct-path load into {target} from a query")
+            return self.execute(sql)
+
+        # File source: the base class owns the parsing (and the shared option names);
+        # only the write is ours. _write_batch is the seam it offers for exactly this.
+        def _direct_path(rows):
+            cols = list(rows[0].keys())
+            binds = ', '.join(f":{i + 1}" for i in range(len(cols)))
+            sql = (f"INSERT /*+ APPEND_VALUES */ INTO {target} "
+                   f"({', '.join(cols)}) VALUES ({binds})")
+            cur = None
+            try:
+                cur = self.get_cursor()
+                cur.executemany(sql, [[self._process_value(r[c]) for c in cols]
+                                      for r in rows])
+                # Direct path holds an exclusive lock until commit; with autocommit off
+                # the next batch would block on our own uncommitted load.
+                if not getattr(self.conn, 'autocommit', False):
+                    self.conn.commit()
+                return {"status": 0, "message": f"{len(rows)} rows loaded",
+                        "data": [], "count": len(rows)}
+            except Exception as e:
+                logger.error(f"Oracle direct-path load into {target} failed: {e}",
+                             exc_info=True)
+                return {"status": -1, "message": str(e), "data": [], "count": 0}
+            finally:
+                if cur:
+                    cur.close()
+
+        logger.info(f"Oracle direct-path load into {target} from a file")
+        return super().bulk_load(table, dict(load_info, _write_batch=_direct_path))
+
     def _construct_bulk_update_sql(self, table, update_columns, key_columns):
         """
         Override to use :1, :2 placeholders for Oracle bulk update.
