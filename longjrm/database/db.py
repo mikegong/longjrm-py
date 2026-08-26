@@ -290,6 +290,8 @@ class Db(ABC):
         if source_type == 'cursor':
             # One statement inside the engine; requires the source to be readable on
             # THIS connection (same database, or a federated table making it look so).
+            logger.info(f"Generic bulk load into {table}: query source folded into one "
+                        f"in-engine INSERT INTO ... SELECT")
             col_clause = f" ({', '.join(columns)})" if columns else ""
             return self.execute(f"INSERT INTO {table}{col_clause} {source}")
 
@@ -301,6 +303,13 @@ class Db(ABC):
         null_value = load_info.get('null_value', '')
         bulk_size = int(load_info.get('bulk_size', 10000))
         has_header = bool(load_info.get('header', False))
+
+        # For an engine without a native channel this IS its bulk path, so INFO, not a
+        # warning -- a warning belongs to the anomaly case, where a native channel was
+        # expected and refused (see mysql.bulk_load's LOCAL INFILE retry).
+        logger.info(f"Generic bulk load into {table}: client-side parse + array-bound "
+                    f"executemany batches ({self.__class__.__name__} has no native "
+                    f"channel or was asked to fall back)")
 
         def _rows(reader):
             for raw in reader:
