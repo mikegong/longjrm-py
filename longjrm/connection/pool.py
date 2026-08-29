@@ -350,6 +350,16 @@ class Pool:
             actual_conn = _unwrap_connection(raw_conn)
             get_connector_class(client['database_type']).set_dbapi_autocommit(actual_conn, False)
 
+            # Same invariant Db.set_autocommit enforces, at this layer's own
+            # autocommit-off point: autocommit off => the transaction is declared to
+            # the pooling wrapper (dbutils SteadyDB). Without it, an error inside the
+            # transaction is silently "cured" by reopening the connection and retrying
+            # the statement -- dropping every uncommitted row and landing the retry on
+            # a fresh autocommit connection.
+            begin = getattr(raw_conn, 'begin', None)
+            if callable(begin):
+                begin()
+
             # Set isolation level if specified
             if isolation_level:
                 try:

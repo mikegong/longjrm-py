@@ -199,6 +199,14 @@ class Db(ABC):
         # Unwrap pooled connection wrappers (DBUtils/SQLAlchemy) to get actual DB-API connection
         actual_conn = unwrap_connection(self.conn)
         get_connector_class(self.database_type).set_dbapi_autocommit(actual_conn, value)
+        # INVARIANT: autocommit off => the transaction is declared to the connection
+        # wrapper (dbutils SteadyDB). Without the declaration, an error mid-transaction
+        # is silently "cured" by reopening the connection and retrying the statement --
+        # dropping every uncommitted row and landing the retry on a fresh autocommit
+        # connection. The declaration rides HERE, with the autocommit flip, so every
+        # caller that turns manual commits on is protected without doing anything.
+        if not value:
+            self.begin()
     
     def get_autocommit(self):
         """Get current autocommit state using connector-specific logic."""
@@ -208,13 +216,44 @@ class Db(ABC):
         actual_conn = unwrap_connection(self.conn)
         return get_connector_class(self.database_type).get_dbapi_autocommit(actual_conn)
 
+    def begin(self):
+        """Declare the start of a manual transaction on the connection wrapper.
+
+        dbutils' SteadyDB transparently REOPENS a broken-looking connection and
+        RETRIES the failing statement -- but only when no transaction was declared.
+        Inside a manual transaction that behaviour is catastrophic and silent: the
+        uncommitted rows vanish with the old connection, and the retried statement
+        lands on a fresh autocommit connection, so a stream that should have been
+        all-or-nothing ends half-committed with a success status. begin() is the
+        wrapper's own seam for saying "errors are mine, raise them". Callers never
+        need it directly: set_autocommit(False) declares it, and commit()/rollback()
+        re-declare it while autocommit stays off (the wrapper clears its flag on
+        both). No-op for a bare DB-API connection without begin().
+        """
+        begin = getattr(self.conn, "begin", None)
+        if callable(begin):
+            begin()
+
+    def _redeclare_transaction(self):
+        """Re-arm the wrapper's transaction flag after commit/rollback cleared it,
+        for as long as autocommit stays off -- the connection is still ours to
+        protect. Best-effort: a connection too broken to report autocommit is about
+        to fail loudly anyway."""
+        try:
+            if not self.get_autocommit():
+                self.begin()
+        except Exception:
+            pass
+
     def commit(self):
         """Commit the current transaction."""
         self.conn.commit()
+        self._redeclare_transaction()
 
     def rollback(self):
         """Rollback the current transaction."""
         self.conn.rollback()
+        self._redeclare_transaction()
     
     def supports_returning(self):
         """
@@ -664,7 +703,16 @@ class Db(ABC):
         Args:
             stream: Iterator yielding rows
             operation_func: Callable(row, row_number) -> result_dict
-            commit_count: Rows between commits (0 to disable manual commit control)
+            commit_count: Rows between commits. N > 0: the handler manages the
+                transaction, committing every N rows (a performance batching over the
+                stream's native row-at-a-time shape). 0: NO commit management -- the
+                handler touches neither autocommit nor commits, and the stream runs
+                under whatever the caller set up. Bare on a pooled connection
+                (autocommit-by-default policy) that is the stream's native behavior:
+                one statement per row, a commit per statement. To run the WHOLE
+                stream as ONE transaction (all-or-nothing), wrap the call in
+                ``pool.transaction()`` and pass 0 -- the handler stays hands-off and
+                the enclosing context commits on success / rolls back on failure.
             max_error_count: Max errors allowed
             table_name: Name of table for logging
             reject_sink: optional callable(row_number, row, reason) invoked for every
@@ -681,11 +729,25 @@ class Db(ABC):
         current_error_count = 0
         reject_count = 0
         
+        if commit_count < 0:
+            raise ValueError(f"commit_count must be >= 0, got {commit_count}")
+
+        # N > 0: the handler owns the transaction. 0: hands off -- the enclosing
+        # transaction (if any) owns it.
+        manages = commit_count > 0
+
         try:
-            if commit_count != 0:
-                autocommit_was_enabled = self.get_autocommit()
+            autocommit_was_enabled = self.get_autocommit()
+            if manages:
+                # set_autocommit(False) also declares the transaction to the connection
+                # wrapper, so a mid-stream error RAISES instead of being silently
+                # retried on a fresh connection (see Db.begin).
                 self.set_autocommit(False)
-            
+            # Whether rows are accumulating in a transaction right now: the handler's
+            # own (manages), or an enclosing one (commit_count=0 inside
+            # pool.transaction(), which turned autocommit off before we got here).
+            in_transaction = manages or not autocommit_was_enabled
+
             for stream_row in stream:
                 # Normalize stream row format
                 if len(stream_row) == 3:
@@ -704,7 +766,7 @@ class Db(ABC):
                         reject_sink(row_number, row, message)
 
                     if current_error_count > max_error_count:
-                        if commit_count != 0: self.rollback()
+                        if manages: self.rollback()
                         return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": message}
                     continue
                 
@@ -718,7 +780,10 @@ class Db(ABC):
                 # keeps its exact behavior and adds no per-row round-trips.
                 tolerant = reject_sink is not None or max_error_count > 0
                 savepoint = None
-                if tolerant and commit_count != 0:
+                # Savepoints only matter inside a transaction (Postgres aborts the
+                # whole tx on a row error; the savepoint confines it) -- the handler's
+                # own or an enclosing one alike. Bare autocommit rows need none.
+                if tolerant and in_transaction:
                     savepoint = f"jrm_sp_{row_number}"
                     self.execute(f"SAVEPOINT {savepoint}")
                 try:
@@ -748,22 +813,26 @@ class Db(ABC):
                         reject_sink(row_number, row, message)
 
                     if current_error_count > max_error_count:
-                        if commit_count != 0: self.rollback()
+                        if manages: self.rollback()
                         return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": message}
                     continue
                 
-                # Periodic commit
-                if commit_count != 0 and row_number > 0 and row_number % commit_count == 0:
+                # Periodic commit (handler-managed mode only)
+                if manages and row_number > 0 and row_number % commit_count == 0:
                     self.commit()
                     logger.info(f"Committed {row_number} rows into {table_name}")
-            
+
             # Final processing
             if row_number == 0:
                 message = f"Incoming stream for {table_name} is empty"
                 logger.info(message)
+                # End the handler-owned (empty) transaction cleanly; an enclosing one
+                # is the caller's to finish.
+                if manages:
+                    self.rollback()
                 return {"status": 0, "record_count": 0, "reject_count": reject_count, "message": message}
 
-            if commit_count != 0:
+            if manages:
                 self.commit()
 
             message = f"{row_number} rows processed into {table_name} successfully"
@@ -773,13 +842,19 @@ class Db(ABC):
         except Exception as e:
             error_message = f"Fatal database error at row {row_number}: {e}"
             logger.error(error_message, exc_info=True)
-            if commit_count != 0:
-                self.rollback()
+            if manages:
+                try:
+                    self.rollback()
+                except Exception:
+                    pass                # the connection may be gone; the error above stands
             return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": error_message}
-            
+
         finally:
-            if commit_count != 0:
-                self.set_autocommit(autocommit_was_enabled)
+            if manages:
+                try:
+                    self.set_autocommit(autocommit_was_enabled)
+                except Exception:
+                    pass                # restoring on a dead connection must not mask the result
 
     def stream_select(self, table, columns=None, where=None, options=None, *, max_error_count=0):
         """
