@@ -384,6 +384,68 @@ db.stream_to_csv(
 )
 ```
 
+## Connection Pooling Backends
+
+`Pool.from_config(cfg, PoolBackend.DBUTILS)` and `PoolBackend.SQLALCHEMY`
+give you the same API over two different poolers. They are not equivalent in
+one respect worth knowing before you choose.
+
+### Stale connections
+
+A pooled connection can die while it sits idle — a firewall or NAT device
+drops the idle TCP mapping, a load balancer times it out, the server restarts.
+Nothing tells the client. The socket looks fine until the next statement, and
+that statement is the one that fails.
+
+A pool guards against this by checking a connection when it hands it back out.
+Both backends do, but they get there differently:
+
+| | how it checks | works out of the box |
+|---|---|---|
+| **SQLAlchemy** | `pool_pre_ping`, implemented by SQLAlchemy per dialect | every database |
+| **DBUtils** | calls `ping()` **on the connection object** | only where the driver has one |
+
+`ping()` is a MySQLdb interface. PyMySQL and `oracledb` have it; **psycopg,
+pyodbc, sqlite3 and `ibm_db_dbi` do not**. When DBUtils calls a `ping()` that
+isn't there it catches the `AttributeError`, reads it as *"this driver cannot
+be pinged"*, sets its own flag to `0` and **never checks that connection
+again** — silently, with no log line. Its own documentation is explicit about
+the condition: *"checked with the `ping()` method **if such a method is
+available**"*.
+
+So on Postgres the DBUtils pool would hand out dead connections as healthy.
+longjrm closes this by supplying the method DBUtils looks for
+(`BaseConnector.attach_liveness`, called for every pooled connection as it is
+created); the per-driver probe behind it is `ping_dbapi()`, which connectors
+override:
+
+- **Postgres** — an empty query (`PQexec("")`), one protocol round trip with no
+  cursor and no risk of opening a transaction. ~10 ms on a WAN link.
+- **DB2** — `SELECT 1 FROM SYSIBM.SYSDUMMY1`.
+- **MySQL, Oracle** — untouched; the driver's own `ping()` is used.
+- **SQLite** — no check. A connection to a local file does not go stale.
+- **SQL Server** — **not covered.** `pyodbc.Connection` is a C type that
+  accepts no new attributes, so there is nowhere to put the method. Creating a
+  DBUtils pool for SQL Server logs a warning saying so. **Use the SQLAlchemy
+  backend if your SQL Server connections can sit idle.**
+
+Detection is not free when the connection died *silently* (a dropped NAT
+mapping rather than a closed socket): the probe has to wait for the TCP
+retransmit timeout, around 20 seconds, before it can conclude anything. That
+is a property of TCP, not of the pool — but it is paid on the checkout that
+follows a long idle period. Where that matters, pass libpq's
+`tcp_user_timeout` through `options` to shorten it.
+
+### Adding a database
+
+A new connector overrides `ping_dbapi()` if its driver has no `ping()` of its
+own and `SELECT 1` is not valid SQL for it. One rule when you do: **the probe
+must never raise `AttributeError`, `IndexError`, `TypeError` or `ValueError`.**
+Those four are exactly what DBUtils reads as "no ping available", so leaking
+one turns the check off permanently and silently. `attach_liveness` funnels
+everything into the driver's `OperationalError` for this reason;
+`longjrm/tests/liveness_test.py` guards it.
+
 ## Async Usage (FastAPI / aiohttp / Sanic)
 
 Starting with **0.2.0**, longjrm exposes an async-friendly API alongside the

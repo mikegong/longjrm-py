@@ -130,7 +130,11 @@ class _DBUtilsBackend(_Backend):
             "mincached":      (jrm_cfg.min_pool_size),
             "maxcached":      (jrm_cfg.max_cached_conn),
             "blocking": True,  # wait when exhausted
-            "ping": 1,         # liveness on checkout
+            # Liveness on checkout. DBUtils performs this by calling ping() on
+            # the connection object, which most drivers do not have -- the
+            # connector supplies one below, in creator_func. Without that this
+            # setting is silently inert. See BaseConnector.attach_liveness.
+            "ping": 1,
             "reset": True      # Always rollback on return to pool
         }
         if dbutils_opts:
@@ -141,7 +145,9 @@ class _DBUtilsBackend(_Backend):
 
         # Custom wrapper to allow attaching metadata for DBUtils inspection
         def creator_func():
-            return self._connector.connect()
+            # Every pooled connection is born here, which makes it the one
+            # place to hand DBUtils the ping() its checkout check calls.
+            return self._connector.attach_liveness(self._connector.connect())
 
         # Try to import metadata via registry (handles fixes automatically)
         from longjrm.connection.driver_registry import load_dbapi_module

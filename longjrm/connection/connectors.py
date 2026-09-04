@@ -9,6 +9,10 @@ from longjrm.config.config import DatabaseConfig
 
 logger = logging.getLogger(__name__)
 
+# Database types whose driver cannot carry a liveness check, already warned
+# about once. See BaseConnector.attach_liveness.
+_LIVENESS_UNSUPPORTED: set[str] = set()
+
 
 class JrmConnectionError(Exception):
     """Raised when a connection failed."""
@@ -110,6 +114,94 @@ class BaseConnector:
         """Set transaction isolation level. Subclasses override with database-specific SQL."""
         logger.warning(f"Isolation level setting not implemented for {type(conn).__name__}")
 
+    # -- Liveness of pooled connections -------------------------------------
+    #
+    # DBUtils checks a connection when it hands it back out of the pool, and
+    # that check is a call to ping() ON THE CONNECTION OBJECT
+    # (steady_db._ping_check). ping() is a MySQLdb interface: only the MySQL
+    # and Oracle drivers have one. Everywhere else DBUtils hits AttributeError,
+    # reads it as "this driver cannot be pinged", sets its own flag to 0 and
+    # never checks that connection again -- with no log line and no error. A
+    # connection that died while idle in the pool is then handed out as
+    # healthy, and the caller finds out on their next statement, inside their
+    # transaction, where DBUtils deliberately does not retry.
+    #
+    # So the check is not missing, it has nothing to call. attach_liveness()
+    # supplies the method; ping_dbapi() is the probe behind it, and that is
+    # what subclasses override. The SQLAlchemy backend needs none of this --
+    # pool_pre_ping is implemented there by SQLAlchemy, per dialect.
+
+    @staticmethod
+    def ping_dbapi(conn) -> None:
+        """Round-trip the server. Return normally if alive, raise if not.
+
+        The default is the most portable probe there is. Subclasses override it
+        with something cheaper, or with SQL their dialect actually accepts.
+        """
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT 1")
+            cursor.fetchall()
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    def attach_liveness(self, conn):
+        """Give DBUtils the ping() it looks for. Returns `conn` either way.
+
+        Called once per pooled connection, where it is created. A driver that
+        already has ping() (MySQL, Oracle) is left alone: its own is better
+        informed than ours.
+        """
+        if hasattr(conn, "ping"):
+            return conn
+
+        operational_error = self._operational_error()
+        probe = type(self).ping_dbapi
+
+        def ping(reconnect=False):
+            # Every failure leaves here as OperationalError, deliberately.
+            # DBUtils reads AttributeError, IndexError, TypeError and
+            # ValueError as "no ping() available" and then disables the check
+            # permanently -- so a bug in the probe would silently restore the
+            # exact blindness this method exists to remove. OperationalError is
+            # the one it reads as "dead", which is what makes it reconnect.
+            try:
+                probe(conn)
+            except Exception as exc:
+                raise operational_error(f"liveness probe failed: {exc}") from exc
+
+        try:
+            conn.ping = ping
+        except (AttributeError, TypeError) as exc:
+            # A C-extension connection type with no instance dict (pyodbc).
+            # Nothing to be done here, but it must not be silent: this pool has
+            # no liveness check, which is worth knowing before a stale
+            # connection proves it.
+            if self.database_type not in _LIVENESS_UNSUPPORTED:
+                _LIVENESS_UNSUPPORTED.add(self.database_type)
+                logger.warning(
+                    f"No pool liveness check for '{self.database_type}': the driver "
+                    f"({self.database_module}) has no ping() and its connection object "
+                    f"takes no new attributes ({exc}). A connection that dies while idle "
+                    f"in a DBUtils pool will surface as an error on first use. Use the "
+                    f"SQLAlchemy backend if this database needs pre-ping."
+                )
+        return conn
+
+    def _operational_error(self):
+        """The driver's OperationalError, or a stand-in when it cannot be found."""
+        try:
+            from longjrm.connection.driver_registry import load_dbapi_module
+            module = load_dbapi_module(self.database_type)
+            if module is not None:
+                return module.OperationalError
+        except Exception:
+            pass
+        return JrmConnectionError
+
 class PostgresConnector(BaseConnector):
     # libpq parameters worth forwarding from `options`. See:
     # https://www.postgresql.org/docs/current/libpq-connect.html
@@ -122,6 +214,24 @@ class PostgresConnector(BaseConnector):
         "service", "passfile", "options", "replication",
         "load_balance_hosts", "hostaddr",
     }
+
+    @staticmethod
+    def ping_dbapi(conn) -> None:
+        """One protocol round trip: no cursor, no transaction.
+
+        psycopg has no ping(). An empty query is libpq's own probe -- it goes
+        to the server and back without executing anything, so unlike
+        `SELECT 1` it cannot open a transaction when autocommit is off.
+        Measured: ~10ms on a WAN link, and transaction_status is still IDLE
+        afterwards.
+        """
+        import psycopg
+
+        if conn.closed:
+            raise psycopg.OperationalError("connection is closed")
+        conn.pgconn.exec_(b"")
+        if conn.pgconn.status != psycopg.pq.ConnStatus.OK:
+            raise psycopg.OperationalError("connection is broken")
 
     def connect(self):
         import psycopg
@@ -228,6 +338,16 @@ class SqliteConnector(BaseConnector):
         "cached_statements", "uri",
     }
 
+    def attach_liveness(self, conn):
+        """Nothing to check: a connection to a local file cannot die in the pool.
+
+        sqlite3.Connection is a C type with no instance dict, so the generic
+        path could not attach a ping() here anyway. This override exists to say
+        the check is *unnecessary* rather than unavailable -- and so the
+        warning stays meaningful for the drivers where it is a real gap.
+        """
+        return conn
+
     def connect(self):
         import sqlite3
         db_path = self.database or ':memory:'
@@ -286,6 +406,19 @@ class Db2Connector(BaseConnector):
         "ClientHostname", "ClientUser",
         "AccountingInformation",
     }
+
+    @staticmethod
+    def ping_dbapi(conn) -> None:
+        """DB2 has no bare `SELECT 1` -- every SELECT needs a FROM."""
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT 1 FROM SYSIBM.SYSDUMMY1")
+            cursor.fetchall()
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
     def connect(self):
         fix_ibm_db_dll()
