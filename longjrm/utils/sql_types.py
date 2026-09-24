@@ -7,7 +7,10 @@ another engine writes in DDL. Going through the token describes each engine once
 instead of once for every pair of engines.
 
 Every engine longjrm connects to is described on both sides: Postgres, MySQL/MariaDB,
-DB2, Oracle, SQL Server, SQLite and Spark. A rendering never narrows silently: a size
+DB2, Oracle, SQL Server, SQLite and Spark. A timestamp that carries a time zone is its
+own token, ``TIMESTAMPTZ``; an engine with no such type writes it as its plain timestamp,
+on which the instant lands as the server's clock reads it. A rendering never narrows
+silently: a size
 past what the engine's type holds takes the engine's widest type of the same kind, and
 a type the maps do not know has no token -- a column of that type is created as
 ``fallback_type``, the engine's widest text type.
@@ -34,9 +37,8 @@ _TO_CANONICAL = {
         "real": "FLOAT", "float4": "FLOAT",
         "double precision": "DOUBLE", "float8": "DOUBLE",
         "boolean": "BOOL", "bool": "BOOL",
-        "timestamp without time zone": "TIMESTAMP",
-        "timestamp with time zone": "TIMESTAMP",
-        "timestamp": "TIMESTAMP", "timestamptz": "TIMESTAMP",
+        "timestamp without time zone": "TIMESTAMP", "timestamp": "TIMESTAMP",
+        "timestamp with time zone": "TIMESTAMPTZ", "timestamptz": "TIMESTAMPTZ",
         "date": "DATE",
         "time without time zone": "TIME", "time with time zone": "TIME",
         "time": "TIME",
@@ -105,7 +107,7 @@ _TO_CANONICAL = {
         "float": "DOUBLE", "binary_float": "FLOAT", "binary_double": "DOUBLE",
         "boolean": "BOOL",
         "date": "TIMESTAMP", "timestamp": "TIMESTAMP",
-        "timestamp with time zone": "TIMESTAMP", "timestamp with local time zone": "TIMESTAMP",
+        "timestamp with time zone": "TIMESTAMPTZ", "timestamp with local time zone": "TIMESTAMPTZ",
         "json": "JSON",
         "blob": "BLOB", "raw": "BLOB", "long raw": "BLOB", "bfile": "BLOB",
     },
@@ -123,7 +125,7 @@ _TO_CANONICAL = {
         "real": "FLOAT", "float": "DOUBLE",
         "bit": "BOOL",
         "datetime": "TIMESTAMP", "datetime2": "TIMESTAMP", "smalldatetime": "TIMESTAMP",
-        "datetimeoffset": "TIMESTAMP", "date": "DATE", "time": "TIME",
+        "datetimeoffset": "TIMESTAMPTZ", "date": "DATE", "time": "TIME",
         "json": "JSON",
         # TIMESTAMP here is ROWVERSION, an 8-byte binary counter -- not a date and time.
         "binary": "BLOB", "varbinary": "BLOB", "image": "BLOB",
@@ -158,7 +160,9 @@ _TO_CANONICAL = {
         "decimal": "DECIMAL", "dec": "DECIMAL", "numeric": "DECIMAL",
         "float": "FLOAT", "real": "FLOAT", "double": "DOUBLE",
         "boolean": "BOOL",
-        "timestamp": "TIMESTAMP", "timestamp_ntz": "TIMESTAMP", "timestamp_ltz": "TIMESTAMP",
+        # Spark's TIMESTAMP is an instant, read in the session's zone; TIMESTAMP_NTZ is the
+        # plain one.
+        "timestamp": "TIMESTAMPTZ", "timestamp_ltz": "TIMESTAMPTZ", "timestamp_ntz": "TIMESTAMP",
         "date": "DATE",
         "array": "JSON", "map": "JSON", "struct": "JSON", "variant": "JSON",
         "binary": "BLOB",
@@ -194,7 +198,7 @@ _RENDER = {
         "DECIMAL": _decimal("NUMERIC", 1000, "NUMERIC"),
         "FLOAT": "REAL", "DOUBLE": "DOUBLE PRECISION",
         "BOOL": "BOOLEAN",
-        "TIMESTAMP": "TIMESTAMP", "DATE": "DATE", "TIME": "TIME",
+        "TIMESTAMP": "TIMESTAMP", "TIMESTAMPTZ": "TIMESTAMPTZ", "DATE": "DATE", "TIME": "TIME",
         "JSON": "JSONB", "BLOB": "BYTEA",
     },
     "mysql": {
@@ -206,7 +210,7 @@ _RENDER = {
         "FLOAT": "FLOAT", "DOUBLE": "DOUBLE",
         "BOOL": "TINYINT(1)",
         # MySQL TIMESTAMP has the 2038 limit; DATETIME is safe and stores no tz.
-        "TIMESTAMP": "DATETIME(6)", "DATE": "DATE", "TIME": "TIME(6)",
+        "TIMESTAMP": "DATETIME(6)", "TIMESTAMPTZ": "DATETIME(6)", "DATE": "DATE", "TIME": "TIME(6)",
         "JSON": "JSON", "BLOB": "LONGBLOB",
     },
     "db2": {
@@ -218,7 +222,7 @@ _RENDER = {
         "DECIMAL": _decimal("DECIMAL", 31, "DECFLOAT(34)"),
         "FLOAT": "REAL", "DOUBLE": "DOUBLE",
         "BOOL": "BOOLEAN",
-        "TIMESTAMP": "TIMESTAMP", "DATE": "DATE", "TIME": "TIME",
+        "TIMESTAMP": "TIMESTAMP", "TIMESTAMPTZ": "TIMESTAMP", "DATE": "DATE", "TIME": "TIME",
         "JSON": "CLOB(1G)", "BLOB": "BLOB(1G)",
     },
     "oracle": {
@@ -229,7 +233,7 @@ _RENDER = {
         "FLOAT": "BINARY_FLOAT", "DOUBLE": "BINARY_DOUBLE",
         # A BOOLEAN column arrived in 23ai; NUMBER(1) works on every release.
         "BOOL": "NUMBER(1)",
-        "TIMESTAMP": "TIMESTAMP", "DATE": "DATE",
+        "TIMESTAMP": "TIMESTAMP", "TIMESTAMPTZ": "TIMESTAMP WITH TIME ZONE", "DATE": "DATE",
         # No TIME type: a time of day is the interval since midnight.
         "TIME": "INTERVAL DAY(0) TO SECOND(6)",
         # A JSON column arrived in 21c; CLOB works on every release.
@@ -244,7 +248,7 @@ _RENDER = {
         # FLOAT is 8-byte here; REAL is 4-byte.
         "FLOAT": "REAL", "DOUBLE": "FLOAT",
         "BOOL": "BIT",
-        "TIMESTAMP": "DATETIME2(6)", "DATE": "DATE", "TIME": "TIME(6)",
+        "TIMESTAMP": "DATETIME2(6)", "TIMESTAMPTZ": "DATETIMEOFFSET(6)", "DATE": "DATE", "TIME": "TIME(6)",
         "JSON": "NVARCHAR(MAX)", "BLOB": "VARBINARY(MAX)",
     },
     "sqlite": {
@@ -255,7 +259,7 @@ _RENDER = {
         "DECIMAL": _decimal("NUMERIC", None, "NUMERIC"),
         "FLOAT": "REAL", "DOUBLE": "REAL",
         "BOOL": "BOOLEAN",
-        "TIMESTAMP": "TIMESTAMP", "DATE": "DATE", "TIME": "TIME",
+        "TIMESTAMP": "TIMESTAMP", "TIMESTAMPTZ": "TIMESTAMP", "DATE": "DATE", "TIME": "TIME",
         # A declared JSON type would take NUMERIC affinity and turn '123' into a number.
         "JSON": "TEXT", "BLOB": "BLOB",
     },
@@ -266,7 +270,7 @@ _RENDER = {
         "FLOAT": "FLOAT", "DOUBLE": "DOUBLE",
         "BOOL": "BOOLEAN",
         # No TIME type: a time of day is kept as its text.
-        "TIMESTAMP": "TIMESTAMP", "DATE": "DATE", "TIME": "STRING",
+        "TIMESTAMP": "TIMESTAMP_NTZ", "TIMESTAMPTZ": "TIMESTAMP", "DATE": "DATE", "TIME": "STRING",
         "JSON": "STRING", "BLOB": "BINARY",
     },
 }

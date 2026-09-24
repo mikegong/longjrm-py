@@ -9,7 +9,7 @@ from longjrm.utils.sql_types import (
 
 ENGINES = ("postgres", "mysql", "db2", "oracle", "sqlserver", "sqlite", "spark")
 TOKENS = ("STRING", "TEXT", "TINYINT", "SMALLINT", "INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE",
-          "BOOL", "TIMESTAMP", "DATE", "TIME", "JSON", "BLOB")
+          "BOOL", "TIMESTAMP", "TIMESTAMPTZ", "DATE", "TIME", "JSON", "BLOB")
 
 
 def test_every_engine_is_described_on_both_sides():
@@ -32,7 +32,7 @@ def test_sizes_are_ignored_and_the_words_around_them_kept():
     assert canonical_type("postgres", "character varying(100)") == "STRING"
     assert canonical_type("postgres", "timestamp(3) without time zone") == "TIMESTAMP"
     assert canonical_type("mysql", "int(10) unsigned") == "BIGINT"
-    assert canonical_type("oracle", "TIMESTAMP(6) WITH TIME ZONE") == "TIMESTAMP"
+    assert canonical_type("oracle", "TIMESTAMP(6) WITH TIME ZONE") == "TIMESTAMPTZ"
 
 
 def test_a_declared_array_is_the_engines_array():
@@ -62,6 +62,9 @@ def test_an_unknown_type_has_no_token():
     ("mysql", "bigint unsigned", "DECIMAL"), ("mysql", "enum", "STRING"), ("mysql", "year", "SMALLINT"),
     ("sqlite", "INTEGER", "BIGINT"), ("sqlite", "VARCHAR(20)", "STRING"), ("sqlite", "REAL", "DOUBLE"),
     ("spark", "string", "TEXT"), ("spark", "long", "BIGINT"), ("spark", "decimal(10,2)", "DECIMAL"),
+    ("postgres", "timestamp with time zone", "TIMESTAMPTZ"), ("postgres", "timestamp", "TIMESTAMP"),
+    ("oracle", "TIMESTAMP(6) WITH LOCAL TIME ZONE", "TIMESTAMPTZ"), ("sqlserver", "datetimeoffset", "TIMESTAMPTZ"),
+    ("spark", "timestamp", "TIMESTAMPTZ"), ("spark", "timestamp_ntz", "TIMESTAMP"),
 ])
 def test_native_types_canonicalize(engine, raw, canonical):
     assert canonical_type(engine, raw) == canonical
@@ -144,6 +147,15 @@ def test_render_for_sqlite_and_spark():
     assert render_type("STRING", "spark", 100) == "STRING"
     assert render_type("DECIMAL", "spark") == "DECIMAL(38,18)"
     assert render_type("BLOB", "spark") == "BINARY"
+
+
+def test_a_timestamp_with_a_zone_keeps_it_where_the_engine_has_one():
+    assert render_type("TIMESTAMPTZ", "postgres") == "TIMESTAMPTZ"
+    assert render_type("TIMESTAMPTZ", "oracle") == "TIMESTAMP WITH TIME ZONE"
+    assert render_type("TIMESTAMPTZ", "sqlserver") == "DATETIMEOFFSET(6)"
+    assert (render_type("TIMESTAMPTZ", "spark"), render_type("TIMESTAMP", "spark")) == ("TIMESTAMP", "TIMESTAMP_NTZ")
+    assert render_type("TIMESTAMPTZ", "mysql") == "DATETIME(6)"
+    assert render_type("TIMESTAMPTZ", "db2") == "TIMESTAMP"
 
 
 def test_the_fallback_is_the_engines_widest_text():
