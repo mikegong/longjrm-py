@@ -400,9 +400,12 @@ render_type(canonical_type("oracle", "DATE"), "mysql")  # 'DATETIME(6)'
 fallback_type("postgres")                               # 'TEXT', for a type with no token
 ```
 
-Source types are known for Postgres, MySQL/MariaDB, DB2, Oracle and SQL Server;
-DDL renders for Postgres and MySQL/MariaDB. `canonical_type` returns `None` for a
-type it does not know, and `render_type` for a token the engine does not render.
+Postgres, MySQL/MariaDB, DB2, Oracle, SQL Server, SQLite and Spark are described
+on both sides. A rendering never narrows silently: a size past what the engine's type
+holds takes its widest type of the same kind (DB2 `DECIMAL` past 31 digits is
+`DECFLOAT(34)`), and a negative length is no limit, as SQL Server reports `MAX`.
+`canonical_type` returns `None` for a type it does not know; create that column as
+`fallback_type`.
 
 ## Connection Pooling Backends
 
