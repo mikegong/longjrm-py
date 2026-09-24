@@ -275,7 +275,10 @@ _RENDER = {
 _ALIASES = {"postgresql": "postgres", "mariadb": "mysql", "mssql": "sqlserver"}
 
 
-def _engine(database_type):
+def engine_name(database_type):
+    """The engine a longjrm database type names, with the aliases ``get_db`` accepts
+    resolved: ``postgresql`` is ``postgres``, ``mariadb`` is ``mysql``, ``mssql`` is
+    ``sqlserver``. What a caller keys its own per-engine tables by."""
     name = str(database_type or "").strip().lower()
     return _ALIASES.get(name, name)
 
@@ -290,14 +293,14 @@ def canonical_type(database_type, raw_type):
     t = " ".join(re.sub(r"\([^)]*\)|<.*>", " ", str(raw_type).lower()).split())
     if t.endswith("[]"):
         t = "array"
-    return _TO_CANONICAL.get(_engine(database_type), {}).get(t)
+    return _TO_CANONICAL.get(engine_name(database_type), {}).get(t)
 
 
 def render_type(canonical, database_type, length=None, scale=None):
     """The type ``database_type`` writes in DDL for a canonical token, sized by
     ``length`` and ``scale`` where the type takes them -- a negative length is no limit,
     as SQL Server reports MAX; None when the engine has no rendering for the token."""
-    rendering = _RENDER.get(_engine(database_type), {}).get(canonical)
+    rendering = _RENDER.get(engine_name(database_type), {}).get(canonical)
     return rendering(length, scale) if callable(rendering) else rendering
 
 

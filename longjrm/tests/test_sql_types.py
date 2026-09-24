@@ -3,7 +3,9 @@ maps to a canonical token, and a token renders as the type an engine writes in D
 
 import pytest
 
-from longjrm.utils.sql_types import _RENDER, _TO_CANONICAL, canonical_type, fallback_type, render_type
+from longjrm.utils.sql_types import (
+    _RENDER, _TO_CANONICAL, canonical_type, engine_name, fallback_type, render_type,
+)
 
 ENGINES = ("postgres", "mysql", "db2", "oracle", "sqlserver", "sqlite", "spark")
 TOKENS = ("STRING", "TEXT", "TINYINT", "SMALLINT", "INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE",
@@ -70,6 +72,8 @@ def test_the_aliases_get_db_accepts_name_the_same_engines():
     assert canonical_type("mariadb", "mediumint") == "INT"
     assert canonical_type("MSSQL", "bit") == "BOOL"
     assert render_type("INT", "postgresql") == "INTEGER"
+    assert [engine_name(t) for t in ("PostgreSQL", "mariadb", "mssql", "db2", None)] == [
+        "postgres", "mysql", "sqlserver", "db2", ""]
 
 
 def test_a_negative_length_is_no_limit_as_sql_server_reports_max():
