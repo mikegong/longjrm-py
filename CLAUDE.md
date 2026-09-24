@@ -23,6 +23,9 @@ DB-API 2.0 driver via `GenericConnector`. The authoritative driver
 registry is [longjrm/connection/driver_map.json](longjrm/connection/driver_map.json) —
 add a new entry there, then implement a `Db` subclass (see "ABC trap"
 below) and register it in [longjrm/database/__init__.py](longjrm/database/__init__.py).
+Its column types go in [longjrm/utils/sql_types.py](longjrm/utils/sql_types.py),
+which imports no driver on purpose: a type lookup must work where the
+engine's driver is not installed.
 
 ## Error contract (invariant)
 

@@ -384,6 +384,26 @@ db.stream_to_csv(
 )
 ```
 
+### Column Types Across Databases
+
+`longjrm.utils.sql_types` maps a column type between engines in two steps: the
+type as one engine names it (what its catalog reports) becomes a canonical token,
+and the token renders as the type another engine writes in DDL. No driver is
+imported, so it works where an engine's driver is not installed.
+
+```python
+from longjrm.utils.sql_types import canonical_type, render_type, fallback_type
+
+token = canonical_type("db2", "DECIMAL")                # 'DECIMAL'
+render_type(token, "postgres", 12, 2)                   # 'NUMERIC(12,2)'
+render_type(canonical_type("oracle", "DATE"), "mysql")  # 'DATETIME(6)'
+fallback_type("postgres")                               # 'TEXT', for a type with no token
+```
+
+Source types are known for Postgres, MySQL/MariaDB, DB2, Oracle and SQL Server;
+DDL renders for Postgres and MySQL/MariaDB. `canonical_type` returns `None` for a
+type it does not know, and `render_type` for a token the engine does not render.
+
 ## Connection Pooling Backends
 
 `Pool.from_config(cfg, PoolBackend.DBUTILS)` and `PoolBackend.SQLALCHEMY`
