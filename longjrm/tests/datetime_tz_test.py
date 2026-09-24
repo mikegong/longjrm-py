@@ -3,7 +3,9 @@
 An aware datetime denotes an *instant*. Serializing it without its UTC offset
 does not fail anywhere: the server reads the wall-clock digits in its own
 session time zone and stores a different instant, silently. These tests pin the
-offset to the serialized value on every path that turns a datetime into SQL.
+instant to the serialized value on every path that turns a datetime into SQL:
+with its offset on an engine that has a zoned type, and converted to UTC with no
+offset on one that has none (sql_types.stores_zones_as_utc), SQLite among them.
 
 Self-contained: runs against in-memory SQLite, no test_config required.
 
@@ -13,12 +15,14 @@ import datetime
 import sqlite3
 import sys
 import os
+import types
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from longjrm.config.config import JrmConfig, DatabaseConfig
 from longjrm.config.runtime import configure
+from longjrm.database.db import Db
 from longjrm.database.sqlite import SqliteDb
 from longjrm.database.spark import SparkDb
 from longjrm.utils.data import datalist_to_dataseq, serialize_datetime
@@ -66,9 +70,13 @@ class ProcessValueTests(unittest.TestCase):
     def setUp(self):
         self.db = _make_db()
 
-    def test_aware_datetime_keeps_offset(self):
-        self.assertEqual(self.db._process_value(AWARE_UTC), "2026-08-12 11:26:53.525447+00:00")
-        self.assertEqual(self.db._process_value(AWARE_PLUS8), "2026-08-12 19:26:53.525447+08:00")
+    def test_aware_datetime_is_written_in_utc_where_no_type_keeps_a_zone(self):
+        self.assertEqual(self.db._process_value(AWARE_UTC), "2026-08-12 11:26:53.525447")
+        self.assertEqual(self.db._process_value(AWARE_PLUS8), "2026-08-12 11:26:53.525447")
+
+    def test_aware_datetime_keeps_offset_where_a_type_keeps_the_zone(self):
+        postgres = types.SimpleNamespace(database_type="postgres")
+        self.assertEqual(Db._process_value(postgres, AWARE_PLUS8), "2026-08-12 19:26:53.525447+08:00")
 
     def test_naive_datetime_unchanged(self):
         self.assertEqual(self.db._process_value(NAIVE), "2026-08-12 11:26:53.525447")
@@ -85,44 +93,46 @@ class BulkPathTests(unittest.TestCase):
         batches = list(datalist_to_dataseq([{"ts": AWARE_PLUS8}]))
         self.assertEqual(batches[0][0][0], "2026-08-12 19:26:53.525447+08:00")
 
-    def test_process_value_fn_keeps_offset(self):
+    def test_process_value_fn_writes_what_the_engine_writes(self):
         db = _make_db()
         batches = list(datalist_to_dataseq([{"ts": AWARE_PLUS8}],
                                            process_value_fn=db._process_value))
-        self.assertEqual(batches[0][0][0], "2026-08-12 19:26:53.525447+08:00")
+        self.assertEqual(batches[0][0][0], "2026-08-12 11:26:53.525447")
 
-    def test_both_variants_agree(self):
-        """Bulk and single-row must serialize identically on the same backend."""
+    def test_bulk_and_single_row_agree_on_the_same_backend(self):
+        """A Db's bulk path passes its own _process_value, so it serializes as a row does."""
         db = _make_db()
-        builtin = list(datalist_to_dataseq([{"ts": AWARE_UTC}]))[0][0][0]
-        per_row = db._process_value(AWARE_UTC)
-        self.assertEqual(builtin, per_row)
+        bulk = list(datalist_to_dataseq([{"ts": AWARE_PLUS8}], process_value_fn=db._process_value))[0][0][0]
+        self.assertEqual(bulk, db._process_value(AWARE_PLUS8))
 
 
 class SqliteRoundTripTests(unittest.TestCase):
-    """End to end through insert(): the offset must reach storage."""
+    """End to end through insert(): SQLite keeps no zone, so the instant reaches storage in UTC."""
 
     def setUp(self):
         self.db = _make_db()
         self.db.conn.execute("CREATE TABLE ev (id INTEGER, ts TEXT)")
 
-    def test_single_insert_stores_the_offset(self):
+    def _as_utc(self, stored):
+        return datetime.datetime.fromisoformat(stored).replace(tzinfo=UTC)
+
+    def test_single_insert_stores_the_instant_in_utc(self):
         self.db.insert("ev", {"id": 1, "ts": AWARE_PLUS8})
         stored = self.db.conn.execute("SELECT ts FROM ev WHERE id = 1").fetchone()[0]
-        self.assertEqual(stored, "2026-08-12 19:26:53.525447+08:00")
-        self.assertEqual(datetime.datetime.fromisoformat(stored), AWARE_UTC)
+        self.assertEqual(stored, "2026-08-12 11:26:53.525447")
+        self.assertEqual(self._as_utc(stored), AWARE_UTC)
 
-    def test_bulk_insert_stores_the_offset(self):
+    def test_bulk_insert_stores_the_instant_in_utc(self):
         self.db.insert("ev", [{"id": 2, "ts": AWARE_UTC}, {"id": 3, "ts": AWARE_PLUS8}])
         rows = dict(self.db.conn.execute("SELECT id, ts FROM ev").fetchall())
-        self.assertEqual(datetime.datetime.fromisoformat(rows[2]), AWARE_UTC)
-        self.assertEqual(datetime.datetime.fromisoformat(rows[3]), AWARE_UTC)
+        self.assertEqual(self._as_utc(rows[2]), AWARE_UTC)
+        self.assertEqual(self._as_utc(rows[3]), AWARE_UTC)
 
-    def test_update_stores_the_offset(self):
+    def test_update_stores_the_instant_in_utc(self):
         self.db.insert("ev", {"id": 4, "ts": NAIVE})
         self.db.update("ev", {"ts": AWARE_PLUS8}, where={"id": 4})
         stored = self.db.conn.execute("SELECT ts FROM ev WHERE id = 4").fetchone()[0]
-        self.assertEqual(datetime.datetime.fromisoformat(stored), AWARE_UTC)
+        self.assertEqual(self._as_utc(stored), AWARE_UTC)
 
 
 class SparkLiteralTests(unittest.TestCase):

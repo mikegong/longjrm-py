@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from longjrm.config.runtime import get_config
 from longjrm.database.placeholder_handler import PlaceholderHandler
 from longjrm.connection.connectors import get_connector_class, unwrap_connection
-from longjrm.utils import sql as sql_utils, data as data_utils
+from longjrm.utils import sql as sql_utils, data as data_utils, sql_types
 
 
 logger = logging.getLogger(__name__)
@@ -1066,6 +1066,13 @@ class Db(ABC):
             # Aware values keep their UTC offset -- dropping it makes the server
             # read the digits in its own session time zone and store a different
             # instant, with no error anywhere. See data_utils.serialize_datetime.
+            # An engine with no type that keeps a zone holds the instant in UTC
+            # instead (sql_types.stores_zones_as_utc): given the offset, DB2
+            # refuses it, MySQL shifts it to the session zone and SQLite keeps
+            # the text.
+            if (value.tzinfo is not None and value.utcoffset() is not None
+                    and sql_types.stores_zones_as_utc(self.database_type)):
+                value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
             return data_utils.serialize_datetime(value)
         elif isinstance(value, datetime.date):
             return str(value)

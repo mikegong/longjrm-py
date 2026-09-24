@@ -8,9 +8,10 @@ instead of once for every pair of engines.
 
 Every engine longjrm connects to is described on both sides: Postgres, MySQL/MariaDB,
 DB2, Oracle, SQL Server, SQLite and Spark. A timestamp that carries a time zone is its
-own token, ``TIMESTAMPTZ``; an engine with no such type writes it as its plain timestamp,
-on which the instant lands as the server's clock reads it. A rendering never narrows
-silently: a size
+own token, ``TIMESTAMPTZ``. MySQL, DB2 and SQLite have no type that keeps a zone, so they
+write it as their plain timestamp and keep the instant there in UTC
+(``stores_zones_as_utc``): longjrm writes an aware datetime to them converted to UTC, and
+such a column is read as UTC. A rendering never narrows silently: a size
 past what the engine's type holds takes the engine's widest type of the same kind, and
 a type the maps do not know has no token -- a column of that type is created as
 ``fallback_type``, the engine's widest text type.
@@ -306,6 +307,14 @@ def render_type(canonical, database_type, length=None, scale=None):
     as SQL Server reports MAX; None when the engine has no rendering for the token."""
     rendering = _RENDER.get(engine_name(database_type), {}).get(canonical)
     return rendering(length, scale) if callable(rendering) else rendering
+
+
+def stores_zones_as_utc(database_type):
+    """True for an engine with no type that keeps a time zone: it writes TIMESTAMPTZ as its
+    plain timestamp, which holds the instant in UTC. Read off the renderings, so the maps are
+    the one place this is said."""
+    zoned = render_type("TIMESTAMPTZ", database_type)
+    return zoned is not None and zoned == render_type("TIMESTAMP", database_type)
 
 
 def fallback_type(database_type):

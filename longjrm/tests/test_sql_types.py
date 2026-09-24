@@ -4,7 +4,7 @@ maps to a canonical token, and a token renders as the type an engine writes in D
 import pytest
 
 from longjrm.utils.sql_types import (
-    _RENDER, _TO_CANONICAL, canonical_type, engine_name, fallback_type, render_type,
+    _RENDER, _TO_CANONICAL, canonical_type, engine_name, fallback_type, render_type, stores_zones_as_utc,
 )
 
 ENGINES = ("postgres", "mysql", "db2", "oracle", "sqlserver", "sqlite", "spark")
@@ -164,3 +164,8 @@ def test_the_fallback_is_the_engines_widest_text():
         "sqlserver": "NVARCHAR(MAX)", "sqlite": "TEXT", "spark": "STRING"}
     assert fallback_type("generic") is None
     assert render_type("NO_SUCH_TOKEN", "postgres") is None
+
+
+def test_the_engines_with_no_zoned_type_store_the_instant_in_utc():
+    assert [e for e in ENGINES if stores_zones_as_utc(e)] == ["mysql", "db2", "sqlite"]
+    assert stores_zones_as_utc("mariadb") and not stores_zones_as_utc("generic")

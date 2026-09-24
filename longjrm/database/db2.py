@@ -184,7 +184,9 @@ class Db2Db(Db):
                     else:
                         escaped = val.replace("'", "''")
                         literals[k] = f"'{escaped}'"
-                elif isinstance(val, (datetime.date, datetime.datetime)):
+                elif isinstance(val, datetime.datetime):
+                     literals[k] = f"'{self._process_value(val)}'"
+                elif isinstance(val, datetime.date):
                      literals[k] = f"'{val}'"
                 else:
                      literals[k] = str(val)

@@ -172,8 +172,10 @@ def serialize_datetime(value):
     the offset does not fail loudly -- the server reads the wall-clock digits
     in its own session time zone and stores a different instant, silently. So
     aware values are emitted in ISO 8601 with their offset
-    (``2026-08-12 11:26:53.525447+00:00``), which every supported dialect
-    parses back to the same instant regardless of session settings.
+    (``2026-08-12 11:26:53.525447+00:00``), which an engine with a zoned type
+    parses back to the same instant regardless of session settings. An engine
+    without one (MySQL, DB2, SQLite) is given the instant in UTC with no offset
+    instead -- ``Db._process_value`` converts it before calling this.
 
     **Naive** datetimes keep the historical ``%Y-%m-%d %H:%M:%S.%f`` form.
     They carry no offset to preserve, so there is nothing to fix and no reason

@@ -407,6 +407,11 @@ holds takes its widest type of the same kind (DB2 `DECIMAL` past 31 digits is
 `canonical_type` returns `None` for a type it does not know; create that column as
 `fallback_type`.
 
+A timestamp with a time zone is its own token, `TIMESTAMPTZ`. MySQL, DB2 and SQLite have
+no type that keeps a zone: they write it as their plain timestamp, longjrm writes an aware
+datetime to them converted to UTC, and such a column is read as UTC
+(`stores_zones_as_utc`).
+
 ## Connection Pooling Backends
 
 `Pool.from_config(cfg, PoolBackend.DBUTILS)` and `PoolBackend.SQLALCHEMY`
