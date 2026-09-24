@@ -303,16 +303,16 @@ class AsyncDb:
         async with self._lock:
             return await asyncio.to_thread(self._sync.run_query_from_file, sql_file, values)
 
-    async def execute_script(self, sql_script, transaction=False):
+    async def execute_script(self, sql_script, transaction=False, delimiter=';'):
         async with self._lock:
             return await asyncio.to_thread(
-                self._sync.execute_script, sql_script, transaction
+                self._sync.execute_script, sql_script, transaction, delimiter
             )
 
-    async def run_script_from_file(self, sql_file, transaction=False):
+    async def run_script_from_file(self, sql_file, transaction=False, delimiter=';'):
         async with self._lock:
             return await asyncio.to_thread(
-                self._sync.run_script_from_file, sql_file, transaction
+                self._sync.run_script_from_file, sql_file, transaction, delimiter
             )
 
     async def stream_to_csv(self, sql, csv_file, values=None, options=None):

@@ -1630,13 +1630,19 @@ class Db(ABC):
             sql = f.read()
             return self.query(sql=sql, arr_values=values)
 
-    def execute_script(self, sql_script, transaction=False):
+    def execute_script(self, sql_script, transaction=False, delimiter=';'):
         """
-        Execute a script containing multiple SQL statements separated by semicolons.
-        
+        Execute a script containing multiple SQL statements separated by ``delimiter``.
+
+        The script is split on every occurrence of the delimiter, the way SQL scripts
+        are conventionally terminated. A script whose statements or comments contain a
+        semicolon -- a procedure body, a comment -- is written with another terminator
+        and run with that delimiter, as DB2's command line takes ``-td``.
+
         Args:
-            sql_script: String containing SQL statements separated by ;
+            sql_script: String containing SQL statements separated by ``delimiter``
             transaction: If True, wraps execution in a transaction (autocommit=False)
+            delimiter: The statement terminator (default ';')
 
         Returns:
             On success, a dict with status (0) and message.
@@ -1644,11 +1650,13 @@ class Db(ABC):
             Exception: the underlying driver error if a statement fails. When
                 transaction=True the transaction is rolled back before raising.
         """
+        if not delimiter:
+            raise ValueError("delimiter cannot be empty")
         if not sql_script:
             return {"status": 0, "message": "SQL script is empty"}
 
-        # Split by semicolon and filter empty strings
-        sqls = [s.strip() for s in sql_script.split(';') if s.strip()]
+        # Split by the delimiter and filter empty strings
+        sqls = [s.strip() for s in sql_script.split(delimiter) if s.strip()]
         
         if not sqls:
             return {"status": 0, "message": "SQL script contains no executable statements"}
@@ -1687,13 +1695,14 @@ class Db(ABC):
             if transaction:
                 self.set_autocommit(autocommit_was_enabled)
 
-    def run_script_from_file(self, sql_file, transaction=False):
+    def run_script_from_file(self, sql_file, transaction=False, delimiter=';'):
         """
         Execute multiple SQL statements from a file.
         
         Args:
             sql_file: Path to the SQL file
             transaction: If True, wraps execution in a transaction
+            delimiter: The statement terminator (default ';'), as in execute_script
 
         Returns:
             On success, a dict with status (0) and message.
@@ -1703,7 +1712,7 @@ class Db(ABC):
         """
         with open(sql_file, 'r', encoding='utf-8') as f:
             sql_script = f.read()
-        return self.execute_script(sql_script, transaction=transaction)
+        return self.execute_script(sql_script, transaction=transaction, delimiter=delimiter)
 
     def stream_to_csv(self, sql, csv_file, values=None, options=None):
         """
