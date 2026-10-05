@@ -978,8 +978,8 @@ and triggers **only** when a GitHub Release is *published*. Normal
 ### Steps to cut a release (example: `v0.2.0`)
 
 1. **Bump version on a feature branch**:
-   - Update `VERSION` (single line: `0.2.0`)
-   - Update `pyproject.toml` `version = "0.2.0"` — must match `VERSION`
+   - Update `pyproject.toml` `version = "0.2.0"` — the only place the
+     version is set
    - Move `CHANGELOG.md` `[Unreleased]` entries under a new
      `## [0.2.0] - YYYY-MM-DD` section
    - Commit and push the branch
@@ -1001,7 +1001,7 @@ and triggers **only** when a GitHub Release is *published*. Normal
 
 ### Pre-flight checklist
 
-- [ ] `VERSION` and `pyproject.toml` `version` agree
+- [ ] `pyproject.toml` `version` matches the tag you are about to push
 - [ ] `CHANGELOG.md` `[Unreleased]` is empty (or contains only items
       explicitly intended for the *next* release)
 - [ ] All tests pass against at least one real database
