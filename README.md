@@ -585,8 +585,10 @@ async with pool.aclient() as client:
 
 The iterator holds the AsyncDb's internal lock for the lifetime of
 iteration (the underlying DB-API cursor cannot be shared). The lock is
-auto-released on exhaustion, on `break`, or on exception via the
-adapter's `aclose()`.
+released when the iterator ends or is closed: on exhaustion; after a
+`break` or an exception leaves the `async for`, where Python finalizes
+the dropped generator and the next `await` on that `AsyncDb` sees the
+release; or immediately, with `contextlib.aclosing(...)`.
 
 ### Streaming writes
 
