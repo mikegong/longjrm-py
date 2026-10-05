@@ -451,6 +451,13 @@ class Db2Connector(BaseConnector):
     def set_dbapi_autocommit(conn, autocommit: bool):
         conn.set_autocommit(autocommit)
 
+    @staticmethod
+    def get_dbapi_autocommit(conn) -> bool:
+        # ibm_db_dbi.Connection has set_autocommit() and nothing to read the
+        # state back with; the driver-level call on its handle does.
+        import ibm_db
+        return bool(ibm_db.autocommit(conn.conn_handler))
+
 
 class OracleConnector(BaseConnector):
     # oracledb.connect kwargs worth forwarding from `options`.
@@ -709,6 +716,16 @@ class GenericConnector(BaseConnector):
                 logger.warning(f"Autocommit not supported for connection type: {type(conn).__name__}")
         except Exception as e:
             raise ValueError(f"Function set_autocommit error for connection: {e}")
+
+    @staticmethod
+    def get_dbapi_autocommit(conn) -> bool:
+        # Read it the way set_dbapi_autocommit writes it.
+        attr = getattr(conn, "autocommit", None)
+        if attr is not None and not callable(attr):
+            return bool(attr)                       # psycopg
+        if hasattr(conn, "get_autocommit"):
+            return bool(conn.get_autocommit())      # PyMySQL
+        raise ValueError(f"Cannot read autocommit from connection type: {type(conn).__name__}")
 
 
 def get_connector_class(database_type):
