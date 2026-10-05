@@ -192,6 +192,17 @@ def data_generator():
 
 # Insert generator data, committing every 10k rows
 db.stream_insert(data_generator(), "large_table", commit_count=10000)
+```
+
+Each item of the stream is either a row dict, as above, or the tuple `stream_query` yields, `(row_number, row, status)`, so a query can be piped straight into a write:
+
+```python
+# Copy between two connections without buffering the result set
+source = db_source.stream_query("SELECT name, email FROM users")
+db_target.stream_insert(source, "users_copy", commit_count=10000)
+```
+
+On SQLite, read the source to the end first (`list(source)`): its file lock lets no other connection commit while a read cursor is still open, and the write fails with `database is locked`.
 
 #### Stream Query Results
 

@@ -701,7 +701,11 @@ class Db(ABC):
         Generic handler for stream-based transactional operations (insert/update/merge).
 
         Args:
-            stream: Iterator yielding rows
+            stream: Iterator yielding rows. Each item is either a bare row dict
+                (what a hand-written generator yields; the handler numbers these
+                1..n itself) or the tuple stream_query yields,
+                ``(row_number, row[, status])``, so a query stream can be piped
+                straight into a write.
             operation_func: Callable(row, row_number) -> result_dict
             commit_count: Rows between commits. N > 0: the handler manages the
                 transaction, committing every N rows (a performance batching over the
@@ -749,8 +753,11 @@ class Db(ABC):
             in_transaction = manages or not autocommit_was_enabled
 
             for stream_row in stream:
-                # Normalize stream row format
-                if len(stream_row) == 3:
+                # Normalize stream row format. A dict is a row on its own; without
+                # this branch it would be unpacked into its own keys below.
+                if isinstance(stream_row, dict):
+                     row_number, row, row_status = row_number + 1, stream_row, 0
+                elif len(stream_row) == 3:
                      row_number, row, row_status = stream_row
                 else:
                      row_number, row = stream_row
