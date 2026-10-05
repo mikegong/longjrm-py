@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The license is declared as an SPDX expression.** `pyproject.toml` now says `license = "Apache-2.0"`. setuptools has deprecated the table form and stops supporting it on 2027-02-18. Building from source now needs setuptools 77.0.3 or newer, which pip fetches by itself in an isolated build; installing the wheel is unaffected.
+
 ## [0.4.0] - 2026-10-05
 
 ### Fixed
