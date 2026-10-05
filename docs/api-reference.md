@@ -222,9 +222,11 @@ Insert from iterator with periodic commits.
 result = db.stream_insert(stream, table, commit_count=10000, max_error_count=0)
 ```
 
+Each item of `stream` is either a row dict or the tuple `stream_query` yields, `(row_number, row, status)`, so a query can be piped straight in. The same holds for `stream_update` and `stream_merge`.
+
 ##### stream_update()
 
-Update from iterator with periodic commits.
+Update from iterator with periodic commits. Each row is `{"data": {...}, "condition": {...}}`.
 
 ```python
 result = db.stream_update(stream, table, commit_count=10000, max_error_count=0)

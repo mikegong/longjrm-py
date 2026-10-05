@@ -35,6 +35,11 @@ class _StubDb:
         self.executed.append(sql)
         return {"status": 0, "count": 0}
 
+    # The handler asks the Db for its savepoint statements; use the standard ones.
+    _savepoint_sql = Db._savepoint_sql
+    _rollback_to_savepoint_sql = Db._rollback_to_savepoint_sql
+    _release_savepoint_sql = Db._release_savepoint_sql
+
     # Call the real handler as an unbound method with this stub as self.
     def run(self, stream, op, **kw):
         return Db._stream_transaction_handler(self, stream, op, **kw)

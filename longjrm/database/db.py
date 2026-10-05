@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from longjrm.config.runtime import get_config
 from longjrm.database.placeholder_handler import PlaceholderHandler
 from longjrm.connection.connectors import get_connector_class, unwrap_connection
-from longjrm.utils import sql as sql_utils, data as data_utils
+from longjrm.utils import sql as sql_utils, data as data_utils, sql_types
 
 
 logger = logging.getLogger(__name__)
@@ -215,6 +215,19 @@ class Db(ABC):
     def rollback(self):
         """Rollback the current transaction."""
         self.conn.rollback()
+
+    # Savepoint statements, used to confine one tolerated reject inside a
+    # transaction. These are the standard forms; a subclass overrides what its
+    # engine spells differently. _release_savepoint_sql returns None where the
+    # engine has no such statement.
+    def _savepoint_sql(self, name):
+        return f"SAVEPOINT {name}"
+
+    def _rollback_to_savepoint_sql(self, name):
+        return f"ROLLBACK TO SAVEPOINT {name}"
+
+    def _release_savepoint_sql(self, name):
+        return f"RELEASE SAVEPOINT {name}"
     
     def supports_returning(self):
         """
@@ -232,23 +245,143 @@ class Db(ABC):
 
     def bulk_load(self, table, load_info=None, *, command=None):
         """
-        Bulk load data into table using database-specific high-performance method.
-        
+        Bulk load data into table.
+
+        Engine subclasses override this with their fastest native channel (DB2 via the
+        ADMIN_CMD stored procedure, Postgres via COPY, MySQL via LOAD DATA). This base
+        implementation is the FALLBACK that makes every engine bulk-loadable with no
+        external dependency -- the same principle as DB2 going through a stored
+        procedure instead of the load utility: everything happens through the driver,
+        like SQL. A query source becomes one in-engine INSERT INTO ... SELECT; a file
+        source is parsed client-side and written in array-bound executemany batches,
+        the standard high-performance path for engines (Oracle, SQL Server) whose
+        native bulk channels want server-side files or external utilities.
+
         Args:
-            table: Target table name
-            load_info: Data source or configuration (used if command is not provided).
-                Can be:
-                - Config dictionary (RECOMMENDED): {'source': '...', 'delimiter': ',', ...}
-                - Source string: File path or SQL query (uses default options)
-            command: Optional raw database-specific bulk load command. If provided,
-                it takes precedence over load_info.
-        Raises:
-            NotImplementedError: If the database does not support bulk loading
+            table: Target table name, e.g. "my_table". Also supports
+                "my_table(col1, col2)" naming the columns to load into.
+            load_info: Config dictionary:
+                - source: 'file path' or 'SELECT query' (required)
+                - source_type: 'file' | 'cursor' (auto-detected when omitted)
+                - columns: List of target columns (alternative to the table(...) form)
+                - delimiter: Field delimiter (default ',')
+                - quote: Quote character (default '"')
+                - encoding: File encoding (default 'utf-8')
+                - header: True when the file's first line is column names; it is
+                  skipped, and used as the column list if none was given
+                - null_value: The string that means NULL (default '': what
+                  stream_to_csv writes for None)
+                - bulk_size: Rows per executemany batch (default 10000)
+            command: Optional raw engine-specific command (executed verbatim,
+                bypassing load_info).
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support bulk_load(). "
-            f"Use insert() with a list for batch operations instead."
-        )
+        import csv
+
+        if command:
+            return self.execute(command)
+        if not isinstance(load_info, dict):
+            raise TypeError(
+                f"bulk_load requires a configuration dictionary for 'load_info', "
+                f"got {type(load_info).__name__}")
+
+        columns = load_info.get('columns')
+        if table and '(' in str(table):
+            t_parts = table.split('(', 1)
+            table = t_parts[0].strip()
+            if not columns:
+                columns = [c.strip() for c in t_parts[1].rstrip(')').split(',')]
+
+        source = load_info.get('source')
+        source_type = load_info.get('source_type')
+        if source_type is None:
+            if isinstance(source, str):
+                upper_src = source.strip().upper()
+                source_type = 'cursor' if upper_src.startswith(('SELECT', '(SELECT'))                     else 'file'
+            else:
+                source_type = 'file'          # a file-like object
+
+        if source_type == 'cursor':
+            # One statement inside the engine; requires the source to be readable on
+            # THIS connection (same database, or a federated table making it look so).
+            logger.info(f"Generic bulk load into {table}: query source folded into one "
+                        f"in-engine INSERT INTO ... SELECT")
+            col_clause = f" ({', '.join(columns)})" if columns else ""
+            return self.execute(f"INSERT INTO {table}{col_clause} {source}")
+
+        if source_type != 'file':
+            raise ValueError(f"Unknown source_type: {source_type}")
+
+        delimiter = load_info.get('delimiter', ',')
+        quote = load_info.get('quote', '"')
+        null_value = load_info.get('null_value', '')
+        bulk_size = int(load_info.get('bulk_size', 10000))
+        has_header = bool(load_info.get('header', False))
+
+        # For an engine without a native channel this IS its bulk path, so INFO, not a
+        # warning -- a warning belongs to the anomaly case, where a native channel was
+        # expected and refused (see mysql.bulk_load's LOCAL INFILE retry).
+        #
+        # A driver may also be here only for the file handling, having supplied its own
+        # fast write through _write_batch (Oracle's direct path does). Say which, or the
+        # log claims a slow route that is not being taken.
+        route = ("client-side parse, driver-supplied batch write"
+                 if load_info.get('_write_batch')
+                 else "client-side parse + array-bound executemany batches")
+        logger.info(f"Bulk load into {table}: {route} ({self.__class__.__name__})")
+
+        def _rows(reader):
+            for raw in reader:
+                if not raw:
+                    continue                   # a blank line is not a row of NULLs
+                yield [None if v == null_value else v for v in raw]
+
+        file_handle = None
+        try:
+            if isinstance(source, str):
+                file_handle = open(source, 'r', newline='',
+                                   encoding=load_info.get('encoding', 'utf-8'))
+                stream = file_handle
+            else:
+                stream = source
+            reader = csv.reader(stream, delimiter=delimiter, quotechar=quote)
+
+            if has_header:
+                header_row = next(reader, None)
+                if columns is None and header_row:
+                    columns = [c.strip() for c in header_row]
+            if not columns:
+                raise ValueError(
+                    "bulk_load from a file needs the target columns: pass 'columns', "
+                    "use the table(col, ...) form, or set header=True on a file whose "
+                    "first line names them")
+
+            # write_batch is the seam a driver overrides to keep this file handling and
+            # substitute its own fast write (Oracle's direct-path INSERT, say).
+            write_batch = load_info.get('_write_batch') or (
+                lambda rows: self.insert(table, rows))
+
+            total = 0
+            batch = []
+            for values in _rows(reader):
+                batch.append(dict(zip(columns, values)))
+                if len(batch) >= bulk_size:
+                    result = write_batch(batch)
+                    if result.get('status', 0) != 0:
+                        return result
+                    total += len(batch)
+                    batch = []
+            if batch:
+                result = write_batch(batch)
+                if result.get('status', 0) != 0:
+                    return result
+                total += len(batch)
+
+            message = f"Bulk load to {table} completed. {total} rows loaded."
+            logger.info(message)
+            return {"status": 0, "message": message, "data": [], "count": total}
+        finally:
+            if file_handle:
+                file_handle.close()
 
     def select(self, table, columns=None, where=None, options=None):
         """
@@ -542,9 +675,22 @@ class Db(ABC):
         Generic handler for stream-based transactional operations (insert/update/merge).
 
         Args:
-            stream: Iterator yielding rows
+            stream: Iterator yielding rows. Each item is either a bare row dict
+                (what a hand-written generator yields; the handler numbers these
+                1..n itself) or the tuple stream_query yields,
+                ``(row_number, row[, status])``, so a query stream can be piped
+                straight into a write.
             operation_func: Callable(row, row_number) -> result_dict
-            commit_count: Rows between commits (0 to disable manual commit control)
+            commit_count: Rows between commits. N > 0: the handler manages the
+                transaction, committing every N rows (a performance batching over the
+                stream's native row-at-a-time shape). 0: NO commit management -- the
+                handler touches neither autocommit nor commits, and the stream runs
+                under whatever the caller set up. Bare on a pooled connection
+                (autocommit-by-default policy) that is the stream's native behavior:
+                one statement per row, a commit per statement. To run the WHOLE
+                stream as ONE transaction (all-or-nothing), wrap the call in
+                ``pool.transaction()`` and pass 0 -- the handler stays hands-off and
+                the enclosing context commits on success / rolls back on failure.
             max_error_count: Max errors allowed
             table_name: Name of table for logging
             reject_sink: optional callable(row_number, row, reason) invoked for every
@@ -561,14 +707,34 @@ class Db(ABC):
         current_error_count = 0
         reject_count = 0
         
+        if commit_count < 0:
+            raise ValueError(f"commit_count must be >= 0, got {commit_count}")
+
+        # N > 0: the handler owns the transaction. 0: hands off -- the enclosing
+        # transaction (if any) owns it.
+        manages = commit_count > 0
+
         try:
-            if commit_count != 0:
+            # Rejects are tolerated row by row when a sink is given or errors are allowed.
+            tolerant = reject_sink is not None or max_error_count > 0
+            # The connection's autocommit state is read only when it is needed: to
+            # put it back after a managed stream, or to know whether a tolerated
+            # reject needs a savepoint. A plain hands-off stream reads nothing.
+            if manages or tolerant:
                 autocommit_was_enabled = self.get_autocommit()
+            if manages:
                 self.set_autocommit(False)
-            
+            # Whether rows are accumulating in a transaction right now: the handler's
+            # own (manages), or an enclosing one (commit_count=0 inside
+            # pool.transaction(), which turned autocommit off before we got here).
+            in_transaction = manages or not autocommit_was_enabled
+
             for stream_row in stream:
-                # Normalize stream row format
-                if len(stream_row) == 3:
+                # Normalize stream row format. A dict is a row on its own; without
+                # this branch it would be unpacked into its own keys below.
+                if isinstance(stream_row, dict):
+                     row_number, row, row_status = row_number + 1, stream_row, 0
+                elif len(stream_row) == 3:
                      row_number, row, row_status = stream_row
                 else:
                      row_number, row = stream_row
@@ -584,7 +750,7 @@ class Db(ABC):
                         reject_sink(row_number, row, message)
 
                     if current_error_count > max_error_count:
-                        if commit_count != 0: self.rollback()
+                        if manages: self.rollback()
                         return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": message}
                     continue
                 
@@ -596,11 +762,13 @@ class Db(ABC):
                 # transaction (Postgres aborts the whole tx on error; the savepoint
                 # confines that). The savepoint path is opt-in, so the default load
                 # keeps its exact behavior and adds no per-row round-trips.
-                tolerant = reject_sink is not None or max_error_count > 0
                 savepoint = None
-                if tolerant and commit_count != 0:
+                # Savepoints only matter inside a transaction (Postgres aborts the
+                # whole tx on a row error; the savepoint confines it) -- the handler's
+                # own or an enclosing one alike. Bare autocommit rows need none.
+                if tolerant and in_transaction:
                     savepoint = f"jrm_sp_{row_number}"
-                    self.execute(f"SAVEPOINT {savepoint}")
+                    self.execute(self._savepoint_sql(savepoint))
                 try:
                     result = operation_func(row, row_number)
                 except Exception as op_error:
@@ -609,13 +777,14 @@ class Db(ABC):
                     result = {"status": -1, "message": str(op_error)}
                     if savepoint is not None:
                         try:
-                            self.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                            self.execute(self._rollback_to_savepoint_sql(savepoint))
                         except Exception:
                             pass
                 else:
-                    if savepoint is not None:
+                    release = self._release_savepoint_sql(savepoint) if savepoint is not None else None
+                    if release:
                         try:
-                            self.execute(f"RELEASE SAVEPOINT {savepoint}")
+                            self.execute(release)
                         except Exception:
                             pass
 
@@ -628,22 +797,26 @@ class Db(ABC):
                         reject_sink(row_number, row, message)
 
                     if current_error_count > max_error_count:
-                        if commit_count != 0: self.rollback()
+                        if manages: self.rollback()
                         return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": message}
                     continue
                 
-                # Periodic commit
-                if commit_count != 0 and row_number > 0 and row_number % commit_count == 0:
+                # Periodic commit (handler-managed mode only)
+                if manages and row_number > 0 and row_number % commit_count == 0:
                     self.commit()
                     logger.info(f"Committed {row_number} rows into {table_name}")
-            
+
             # Final processing
             if row_number == 0:
                 message = f"Incoming stream for {table_name} is empty"
                 logger.info(message)
+                # End the handler-owned (empty) transaction cleanly; an enclosing one
+                # is the caller's to finish.
+                if manages:
+                    self.rollback()
                 return {"status": 0, "record_count": 0, "reject_count": reject_count, "message": message}
 
-            if commit_count != 0:
+            if manages:
                 self.commit()
 
             message = f"{row_number} rows processed into {table_name} successfully"
@@ -653,13 +826,19 @@ class Db(ABC):
         except Exception as e:
             error_message = f"Fatal database error at row {row_number}: {e}"
             logger.error(error_message, exc_info=True)
-            if commit_count != 0:
-                self.rollback()
+            if manages:
+                try:
+                    self.rollback()
+                except Exception:
+                    pass                # the connection may be gone; the error above stands
             return {"status": -1, "record_count": row_number, "reject_count": reject_count, "message": error_message}
-            
+
         finally:
-            if commit_count != 0:
-                self.set_autocommit(autocommit_was_enabled)
+            if manages:
+                try:
+                    self.set_autocommit(autocommit_was_enabled)
+                except Exception:
+                    pass                # restoring on a dead connection must not mask the result
 
     def stream_select(self, table, columns=None, where=None, options=None, *, max_error_count=0):
         """
@@ -868,7 +1047,17 @@ class Db(ABC):
                 return value
         elif isinstance(value, datetime.datetime):
             # Must be checked before datetime.date: datetime is a date subclass.
-            return datetime.datetime.strftime(value, '%Y-%m-%d %H:%M:%S.%f')
+            # Aware values keep their UTC offset -- dropping it makes the server
+            # read the digits in its own session time zone and store a different
+            # instant, with no error anywhere. See data_utils.serialize_datetime.
+            # An engine with no type that keeps a zone holds the instant in UTC
+            # instead (sql_types.stores_zones_as_utc): given the offset, DB2
+            # refuses it, MySQL shifts it to the session zone and SQLite keeps
+            # the text.
+            if (value.tzinfo is not None and value.utcoffset() is not None
+                    and sql_types.stores_zones_as_utc(self.database_type)):
+                value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return data_utils.serialize_datetime(value)
         elif isinstance(value, datetime.date):
             return str(value)
         elif isinstance(value, str):
@@ -1425,13 +1614,19 @@ class Db(ABC):
             sql = f.read()
             return self.query(sql=sql, arr_values=values)
 
-    def execute_script(self, sql_script, transaction=False):
+    def execute_script(self, sql_script, transaction=False, delimiter=';'):
         """
-        Execute a script containing multiple SQL statements separated by semicolons.
-        
+        Execute a script containing multiple SQL statements separated by ``delimiter``.
+
+        The script is split on every occurrence of the delimiter, the way SQL scripts
+        are conventionally terminated. A script whose statements or comments contain a
+        semicolon -- a procedure body, a comment -- is written with another terminator
+        and run with that delimiter, as DB2's command line takes ``-td``.
+
         Args:
-            sql_script: String containing SQL statements separated by ;
+            sql_script: String containing SQL statements separated by ``delimiter``
             transaction: If True, wraps execution in a transaction (autocommit=False)
+            delimiter: The statement terminator (default ';')
 
         Returns:
             On success, a dict with status (0) and message.
@@ -1439,11 +1634,13 @@ class Db(ABC):
             Exception: the underlying driver error if a statement fails. When
                 transaction=True the transaction is rolled back before raising.
         """
+        if not delimiter:
+            raise ValueError("delimiter cannot be empty")
         if not sql_script:
             return {"status": 0, "message": "SQL script is empty"}
 
-        # Split by semicolon and filter empty strings
-        sqls = [s.strip() for s in sql_script.split(';') if s.strip()]
+        # Split by the delimiter and filter empty strings
+        sqls = [s.strip() for s in sql_script.split(delimiter) if s.strip()]
         
         if not sqls:
             return {"status": 0, "message": "SQL script contains no executable statements"}
@@ -1482,13 +1679,14 @@ class Db(ABC):
             if transaction:
                 self.set_autocommit(autocommit_was_enabled)
 
-    def run_script_from_file(self, sql_file, transaction=False):
+    def run_script_from_file(self, sql_file, transaction=False, delimiter=';'):
         """
         Execute multiple SQL statements from a file.
         
         Args:
             sql_file: Path to the SQL file
             transaction: If True, wraps execution in a transaction
+            delimiter: The statement terminator (default ';'), as in execute_script
 
         Returns:
             On success, a dict with status (0) and message.
@@ -1498,7 +1696,7 @@ class Db(ABC):
         """
         with open(sql_file, 'r', encoding='utf-8') as f:
             sql_script = f.read()
-        return self.execute_script(sql_script, transaction=transaction)
+        return self.execute_script(sql_script, transaction=transaction, delimiter=delimiter)
 
     def stream_to_csv(self, sql, csv_file, values=None, options=None):
         """

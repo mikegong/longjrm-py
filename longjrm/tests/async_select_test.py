@@ -256,6 +256,19 @@ class AsyncDbSmokeTests(unittest.IsolatedAsyncioTestCase):
                     timeout=5.0,
                 )
 
+            # ---- Test 9b: an exception in the loop body releases it too ----
+            async with pool.aclient() as client:
+                db = get_async_db(client)
+                with self.assertRaises(RuntimeError):
+                    async for _row_num, _row, _status in db.stream_query(
+                        "SELECT name FROM test_users",
+                    ):
+                        raise RuntimeError("consumer failed mid-stream")
+                await asyncio.wait_for(
+                    db.select("test_users", ["*"], options={"limit": 1}),
+                    timeout=5.0,
+                )
+
             # ---- Test 10: stream_query_batch yields buckets ----
             async with pool.aclient() as client:
                 db = get_async_db(client)
@@ -334,6 +347,12 @@ class AsyncDbSmokeTests(unittest.IsolatedAsyncioTestCase):
 
                 try:
                     await self._run_for_db(db_key, backend)
+                except TimeoutError:
+                    # TimeoutError is a subclass of OSError. Here it means an
+                    # asyncio.wait_for in _run_for_db expired -- a deadlock on
+                    # the AsyncDb lock -- not an unreachable host: the TCP probe
+                    # above already answered. Let it fail the test.
+                    raise
                 except (ConnectionError, OSError) as e:
                     self.skipTest(f"{db_key} not reachable: {e}")
                 except Exception as e:

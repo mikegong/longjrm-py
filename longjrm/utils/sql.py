@@ -54,6 +54,17 @@ class Raw:
     def __repr__(self):
         return f"Raw({self.text!r})"
 
+    def __str__(self):
+        """The SQL text itself.
+
+        A ``Raw`` IS its expression, so a caller that interpolates one into SQL it
+        builds by hand (``f"... <= {cutoff}"``) must get ``CURRENT_DATE``, not the
+        repr. Without this, such a value works when passed to insert/update/select
+        -- which read ``.text`` -- and silently produces invalid SQL when formatted,
+        which is the harder failure to trace.
+        """
+        return self.text
+
     def __eq__(self, other):
         return isinstance(other, Raw) and other.text == self.text
 

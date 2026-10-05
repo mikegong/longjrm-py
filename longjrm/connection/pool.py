@@ -14,6 +14,13 @@ from longjrm.database import get_db
 logger = logging.getLogger(__name__)
 
 
+class _NoFailover(Exception):
+    """The only "connection failure" class the DBUtils pool is given. No driver
+    raises it, so DBUtils never takes a database error for a broken connection,
+    and never swaps a connection or re-runs a statement after checkout.
+    """
+
+
 class TransactionContext:
     """
     Context object for transaction operations.
@@ -130,18 +137,32 @@ class _DBUtilsBackend(_Backend):
             "mincached":      (jrm_cfg.min_pool_size),
             "maxcached":      (jrm_cfg.max_cached_conn),
             "blocking": True,  # wait when exhausted
-            "ping": 1,         # liveness on checkout
+            # Liveness on checkout. DBUtils performs this by calling ping() on
+            # the connection object, which most drivers do not have -- the
+            # connector supplies one below, in creator_func. Without that this
+            # setting is silently inert. See BaseConnector.attach_liveness.
+            "ping": 1,
             "reset": True      # Always rollback on return to pool
         }
         if dbutils_opts:
             opts.update(dbutils_opts)
+        # After checkout the connection is the caller's. DBUtils' failover --
+        # reopen the connection and re-run the failed statement -- is switched
+        # off by naming a failure class no driver raises. Inside a transaction a
+        # re-run drops the uncommitted rows and commits the retried statement
+        # alone; outside one it can apply a statement twice. A dead pooled
+        # connection is still replaced at checkout, by the ping above. Set after
+        # the caller's options on purpose: this one is not theirs to change.
+        opts["failures"] = (_NoFailover,)
 
         # Single connector instance - PooledDB calls connect() when it needs new connections
         self._connector = get_connector_class(self._cfg.type)(self._cfg)
 
         # Custom wrapper to allow attaching metadata for DBUtils inspection
         def creator_func():
-            return self._connector.connect()
+            # Every pooled connection is born here, which makes it the one
+            # place to hand DBUtils the ping() its checkout check calls.
+            return self._connector.attach_liveness(self._connector.connect())
 
         # Try to import metadata via registry (handles fixes automatically)
         from longjrm.connection.driver_registry import load_dbapi_module
@@ -149,11 +170,7 @@ class _DBUtilsBackend(_Backend):
             mod = load_dbapi_module(self._cfg.type)  # Pass db_type for lookup
             
             if mod:
-                # 1. Get exceptions via 'failures' option (official DBUtils arg)
-                exceptions = (mod.InterfaceError, mod.DatabaseError)
-                opts['failures'] = exceptions
-                
-                # 2. Get threadsafety
+                # Get threadsafety
                 threadsafety = getattr(mod, 'threadsafety', None)
                 
                 # Attach threadsafety to creator function (DBUtils inspection)

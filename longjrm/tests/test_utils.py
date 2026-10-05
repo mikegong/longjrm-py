@@ -175,7 +175,7 @@ def get_create_table_sql(db_type, table_name):
                 department VARCHAR(50),
                 salary DECIMAL(10,2),
                 metadata NVARCHAR(MAX),
-                tags TEXT,
+                tags VARCHAR(1000),
                 created_at DATETIME2 DEFAULT GETDATE(),
                 updated_at DATETIME2 DEFAULT GETDATE()
             )

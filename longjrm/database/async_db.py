@@ -48,58 +48,35 @@ from longjrm.database import get_db
 logger = logging.getLogger(__name__)
 
 
-class _AsyncGenAdapter:
-    """Wraps a synchronous generator so each ``__anext__`` advances the
-    generator on a worker thread while holding the parent ``AsyncDb`` lock.
+async def _aiter_in_thread(gen, lock: asyncio.Lock) -> AsyncIterator:
+    """Drive a synchronous generator from a worker thread, one ``next()`` per
+    ``__anext__``, holding ``lock`` for the lifetime of the iteration.
 
-    Holding the lock for the lifetime of iteration is intentional: the
-    underlying DB-API connection has an open cursor and cannot be shared
-    with another coroutine until the iterator is exhausted (or closed).
+    Holding the lock for the whole iteration is intentional: the underlying
+    DB-API connection has an open cursor and cannot be shared with another
+    coroutine until the iterator is exhausted or closed.
 
-    The adapter also closes the wrapped generator on ``aclose`` (or when
-    iteration completes), ensuring the cursor is released even if the
-    consumer aborts early. ``async for`` calls ``aclose`` on early exit
-    automatically; explicit ``async with`` is also supported.
+    This is a native async generator on purpose. ``async for`` never calls
+    ``aclose()`` on an iterator when the loop exits early, so a hand-written
+    ``__anext__`` class holds the lock forever after a ``break``. A native
+    async generator is finalized by asyncio when it is dropped: the
+    ``finally`` below closes the sync generator (releasing its cursor) and
+    the ``async with`` releases the lock. After an early exit that release is
+    scheduled on the loop, so the next ``await`` on the same ``AsyncDb`` sees
+    it; ``aclose()`` or ``contextlib.aclosing(...)`` releases immediately.
+    A reference kept to the iterator keeps the lock held: iterate it with
+    ``async for`` directly.
     """
-
-    def __init__(self, gen, lock: asyncio.Lock):
-        self._gen = gen
-        self._lock = lock
-        self._lock_acquired = False
-        self._closed = False
-        self._sentinel = object()
-
-    def __aiter__(self) -> AsyncIterator:
-        return self
-
-    async def __anext__(self):
-        if self._closed:
-            raise StopAsyncIteration
-        if not self._lock_acquired:
-            await self._lock.acquire()
-            self._lock_acquired = True
-        value = await asyncio.to_thread(next, self._gen, self._sentinel)
-        if value is self._sentinel:
-            await self.aclose()
-            raise StopAsyncIteration
-        return value
-
-    async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+    sentinel = object()
+    async with lock:
         try:
-            await asyncio.to_thread(self._gen.close)
+            while True:
+                value = await asyncio.to_thread(next, gen, sentinel)
+                if value is sentinel:
+                    return
+                yield value
         finally:
-            if self._lock_acquired:
-                self._lock.release()
-                self._lock_acquired = False
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.aclose()
+            await asyncio.to_thread(gen.close)
 
 
 class AsyncDb:
@@ -224,15 +201,15 @@ class AsyncDb:
     # ``stream_query`` and ``stream_query_batch`` return async iterators
     # that wrap the underlying sync generator. The lock is held for the
     # entire iteration lifetime, since the underlying DB-API cursor cannot
-    # be shared. Use ``async for ... in db.stream_query(sql):`` or wrap in
-    # ``async with db.stream_query(sql) as it:`` for explicit cleanup.
+    # be shared. Use ``async for ... in db.stream_query(sql):``; for explicit
+    # cleanup wrap it in ``contextlib.aclosing(db.stream_query(sql))``.
     #
     # NOTE: returning a coroutine that yields an async iterator would mean
     # callers write ``async for r in await db.stream_query(...):``. We keep
     # the more idiomatic shape: ``async for r in db.stream_query(...):`` —
-    # so these are regular methods returning the adapter directly.
+    # so these are regular methods returning the async generator directly.
     # ------------------------------------------------------------------
-    def stream_query(self, sql, arr_values=None, *, max_error_count=0) -> _AsyncGenAdapter:
+    def stream_query(self, sql, arr_values=None, *, max_error_count=0) -> AsyncIterator:
         """Async-iterate rows from a query without buffering the whole result.
 
         Yields the same tuples as ``Db.stream_query``: ``(row_number, row_dict, status)``.
@@ -244,25 +221,25 @@ class AsyncDb:
                 ...
         """
         gen = self._sync.stream_query(sql, arr_values, max_error_count=max_error_count)
-        return _AsyncGenAdapter(gen, self._lock)
+        return _aiter_in_thread(gen, self._lock)
 
     def stream_query_batch(
         self, sql, arr_values=None, *, batch_size=1000, max_error_count=0
-    ) -> _AsyncGenAdapter:
+    ) -> AsyncIterator:
         """Async-iterate batched rows. Yields ``(row_number, batch_data, status)``."""
         gen = self._sync.stream_query_batch(
             sql, arr_values, batch_size=batch_size, max_error_count=max_error_count
         )
-        return _AsyncGenAdapter(gen, self._lock)
+        return _aiter_in_thread(gen, self._lock)
 
-    def stream_select(self, table, columns=None, where=None, options=None, *, max_error_count=0) -> _AsyncGenAdapter:
+    def stream_select(self, table, columns=None, where=None, options=None, *, max_error_count=0) -> AsyncIterator:
         """Async-iterate a SELECT without buffering -- the streaming counterpart of
         select(). Same SQL as select() (data_fetch_limit default applies; pass
         options={"limit": 0} to stream all). Yields (row_number, row_dict, status)."""
         gen = self._sync.stream_select(
             table, columns=columns, where=where, options=options,
             max_error_count=max_error_count)
-        return _AsyncGenAdapter(gen, self._lock)
+        return _aiter_in_thread(gen, self._lock)
 
     # ------------------------------------------------------------------
     # Streaming writes (Phase 2)
@@ -303,16 +280,16 @@ class AsyncDb:
         async with self._lock:
             return await asyncio.to_thread(self._sync.run_query_from_file, sql_file, values)
 
-    async def execute_script(self, sql_script, transaction=False):
+    async def execute_script(self, sql_script, transaction=False, delimiter=';'):
         async with self._lock:
             return await asyncio.to_thread(
-                self._sync.execute_script, sql_script, transaction
+                self._sync.execute_script, sql_script, transaction, delimiter
             )
 
-    async def run_script_from_file(self, sql_file, transaction=False):
+    async def run_script_from_file(self, sql_file, transaction=False, delimiter=';'):
         async with self._lock:
             return await asyncio.to_thread(
-                self._sync.run_script_from_file, sql_file, transaction
+                self._sync.run_script_from_file, sql_file, transaction, delimiter
             )
 
     async def stream_to_csv(self, sql, csv_file, values=None, options=None):

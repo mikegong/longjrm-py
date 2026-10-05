@@ -38,6 +38,20 @@ class Db2Db(Db):
         """Db2 supports returning columns via SELECT ... FROM FINAL TABLE (INSERT ...)"""
         return True
     
+    def _construct_select_sql(self, table, str_column, str_where, str_order, limit):
+        """
+        Override to use FETCH FIRST syntax for Db2 (LIMIT is not standard Db2 SQL).
+        """
+        str_limit = ''
+        if limit and limit > 0:
+            str_limit = f" FETCH FIRST {limit} ROWS ONLY"
+
+        return f"select {str_column} from {table}{str_where}{str_order}{str_limit}"
+
+    def _savepoint_sql(self, name):
+        """Db2 requires the cursor-retention clause on SAVEPOINT."""
+        return f"SAVEPOINT {name} ON ROLLBACK RETAIN CURSORS"
+
     def _construct_insert_sql(self, table, str_col, values_sql, return_columns):
         """
         Db2 wrap syntax for returning columns: SELECT ... FROM FINAL TABLE (INSERT ...)
@@ -174,7 +188,9 @@ class Db2Db(Db):
                     else:
                         escaped = val.replace("'", "''")
                         literals[k] = f"'{escaped}'"
-                elif isinstance(val, (datetime.date, datetime.datetime)):
+                elif isinstance(val, datetime.datetime):
+                     literals[k] = f"'{self._process_value(val)}'"
+                elif isinstance(val, datetime.date):
                      literals[k] = f"'{val}'"
                 else:
                      literals[k] = str(val)
@@ -227,7 +243,15 @@ class Db2Db(Db):
         final_load_info = load_info.copy()
         if table and 'target' not in final_load_info:
             final_load_info['target'] = table
-            
+
+        # Accept the neutral 'source_type' the sibling drivers speak ('file'/'cursor'),
+        # translated to DB2's filetype (DEL/CURSOR) -- so one calling vocabulary works
+        # against every engine. An explicit filetype still wins: it can also say IXF/ASC,
+        # which the neutral word cannot.
+        if 'filetype' not in final_load_info and 'source_type' in final_load_info:
+            kind = str(final_load_info.pop('source_type')).lower()
+            final_load_info['filetype'] = 'CURSOR' if kind == 'cursor' else 'DEL'
+
         return self.load_admin_cmd(final_load_info)
 
     def load_admin_cmd(self, load_info=None, load_cmd=''):
@@ -328,6 +352,18 @@ class Db2Db(Db):
                                 m_msg = load_message.get('MSG') or load_message.get('msg')
                                 msg_result_text = msg_result_text + f'\nSQLCODE: {m_sqlcode}, MSG: {m_msg}'
                                 logger.info(f"SQLCODE: {m_sqlcode}, MSG: {m_msg}")
+                                # A LOAD whose input never opened (bad path / pipe /
+                                # device) still hands back a counts row of ZEROS, and
+                                # zeros with no rejects read as success above. The
+                                # utility's message suffix carries no severity
+                                # (SQL3109N "beginning to load" is informational), so
+                                # the codes meaning "input never opened" are named:
+                                # nothing was read because nothing COULD be, which is
+                                # not an empty load.
+                                if str(m_sqlcode).strip().upper() in ('SQL2036N', 'SQL2037N', 'SQL3025N'):
+                                    status = -1
+                                    message = f"LOAD input could not be opened: {m_msg}"
+                                    logger.error(message)
                             message = f"{message} \n\n {msg_result_text}"
                         else:
                             logger.error(f"Failed to get ADMIN_CMD message: {msg_result['message']}")

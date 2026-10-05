@@ -149,6 +149,27 @@ LongJRM provides a unified `Pool` interface with multiple backend implementation
    - Lower memory overhead
    - Simple connection management
 
+### What the Pool Guarantees
+
+The pool's responsibility ends at checkout. Both backends keep the same three promises.
+
+1. **The connection is alive.** A pooled connection that died while idle is replaced when it is checked out. The README section "Stale connections" has the per-driver details and the one gap, SQL Server on the DBUtils backend.
+2. **Autocommit is on.** Every checkout sets it, whatever the previous caller left. You may turn it off; the next checkout turns it back on, and work left uncommitted is rolled back when the connection is returned.
+3. **After checkout, nothing is done behind your back.** The connection is never replaced and a statement is never re-run. A database error reaches you as that error, and the transaction it happened in stays as the database left it.
+
+The third promise changed in 0.4.0 for the DBUtils backend, which used to reopen the connection and re-run a failed statement. Inside a transaction that lost the uncommitted rows and committed the re-run statement alone. If a connection dies while you hold it, the next statement now raises the driver's error:
+
+```python
+try:
+    with pool.client() as client:
+        db = get_db(client)
+        db.insert("events", row)
+except Exception:
+    # The connection may be gone. A new checkout gets a live one.
+    # Retry here only if running the work again is safe.
+    ...
+```
+
 ### Basic Pool Usage
 
 ```python
@@ -345,7 +366,7 @@ with pool.client() as client:
 #### Connection Recovery
 
 ```python
-from longjrm.connection.dbconn import JrmConnectionError
+from longjrm.connection.connectors import JrmConnectionError
 import time
 
 @contextmanager

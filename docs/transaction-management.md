@@ -178,6 +178,12 @@ results = pool.execute_batch(operations)
 - **Connection cleanup** guaranteed via `finally` blocks
 - **State restoration** ensures connections returned to pool in known state
 
+### Errors Inside a Transaction
+
+An error inside a transaction is raised to the caller, and nothing else happens: the connection is not replaced and the statement is not run again, on either backend. What the transaction looks like afterwards is up to the database. PostgreSQL aborts the whole transaction, so later statements fail until a rollback. MySQL, DB2, Oracle, SQL Server and SQLite roll back only the failed statement, and the transaction can carry on.
+
+Before 0.4.0 the DBUtils backend reopened the connection and re-ran the failed statement, which dropped the uncommitted rows and committed the re-run statement alone. See "What the Pool Guarantees" in the connection guide.
+
 ### Isolation Level Handling
 
 - **Database-specific** SQL generation for isolation levels

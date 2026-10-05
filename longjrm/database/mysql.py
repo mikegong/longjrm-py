@@ -176,7 +176,29 @@ class MySQLDb(Db):
                 logger.debug(f"LOAD DATA SQL: {load_sql}")
                 
                 cur = self.get_cursor()
-                cur.execute(load_sql)
+                try:
+                    cur.execute(load_sql)
+                except Exception as e:
+                    # LOCAL INFILE is a deployment switch, not a capability: the server
+                    # (local_infile=0) or the client connection can refuse it outright
+                    # (1148/3948), before a single row moves. That makes the base
+                    # class's client-side executemany path a safe retry -- slower, but
+                    # dependent on nothing. Fall back with a warning rather than fail:
+                    # the caller asked for a bulk load, not for this particular wire.
+                    errno = e.args[0] if e.args and isinstance(e.args[0], int) else None
+                    if errno in (1148, 3948):
+                        logger.warning(
+                            f"LOAD DATA LOCAL INFILE is disabled here ({e}); falling "
+                            f"back to the generic client-side bulk path for {table}")
+                        fallback = dict(source=source, source_type='file',
+                                        columns=columns,
+                                        delimiter=opts['delimiter'],
+                                        quote=opts['enclosed_by'],
+                                        header=opts['ignore_lines'] > 0)
+                        if str(opts['character_set']).lower().startswith('utf8'):
+                            fallback['encoding'] = 'utf-8'
+                        return super().bulk_load(table, fallback)
+                    raise
                 
                 row_count = cur.rowcount if cur.rowcount >= 0 else 0
                 

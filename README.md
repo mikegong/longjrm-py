@@ -384,6 +384,128 @@ db.stream_to_csv(
 )
 ```
 
+### Column Types Across Databases
+
+`longjrm.utils.sql_types` maps a column type between engines in two steps: the
+type as one engine names it (what its catalog reports) becomes a canonical token,
+and the token renders as the type another engine writes in DDL. No driver is
+imported, so it works where an engine's driver is not installed.
+
+```python
+from longjrm.utils.sql_types import canonical_type, render_type, fallback_type
+
+token = canonical_type("db2", "DECIMAL")                # 'DECIMAL'
+render_type(token, "postgres", 12, 2)                   # 'NUMERIC(12,2)'
+render_type(canonical_type("oracle", "DATE"), "mysql")  # 'DATETIME(6)'
+fallback_type("postgres")                               # 'TEXT', for a type with no token
+```
+
+Postgres, MySQL/MariaDB, DB2, Oracle, SQL Server, SQLite and Spark are described
+on both sides. A rendering never narrows silently: a size past what the engine's type
+holds takes its widest type of the same kind (DB2 `DECIMAL` past 31 digits is
+`DECFLOAT(34)`), and a negative length is no limit, as SQL Server reports `MAX`.
+`canonical_type` returns `None` for a type it does not know; create that column as
+`fallback_type`.
+
+A timestamp with a time zone is its own token, `TIMESTAMPTZ`. MySQL, DB2 and SQLite have
+no type that keeps a zone: they write it as their plain timestamp, longjrm writes an aware
+datetime to them converted to UTC, and such a column is read as UTC
+(`stores_zones_as_utc`).
+
+## Connection Pooling Backends
+
+`Pool.from_config(cfg, PoolBackend.DBUTILS)` and `PoolBackend.SQLALCHEMY`
+give you the same API over two different poolers. They are not equivalent in
+one respect worth knowing before you choose.
+
+### Stale connections
+
+A pooled connection can die while it sits idle — a firewall or NAT device
+drops the idle TCP mapping, a load balancer times it out, the server restarts.
+Nothing tells the client. The socket looks fine until the next statement, and
+that statement is the one that fails.
+
+A pool guards against this by checking a connection when it hands it back out.
+Both backends do, but they get there differently:
+
+| | how it checks | works out of the box |
+|---|---|---|
+| **SQLAlchemy** | `pool_pre_ping`, implemented by SQLAlchemy per dialect | every database |
+| **DBUtils** | calls `ping()` **on the connection object** | only where the driver has one |
+
+`ping()` is a MySQLdb interface. PyMySQL and `oracledb` have it; **psycopg,
+pyodbc, sqlite3 and `ibm_db_dbi` do not**. When DBUtils calls a `ping()` that
+isn't there it catches the `AttributeError`, reads it as *"this driver cannot
+be pinged"*, sets its own flag to `0` and **never checks that connection
+again** — silently, with no log line. Its own documentation is explicit about
+the condition: *"checked with the `ping()` method **if such a method is
+available**"*.
+
+So on Postgres the DBUtils pool would hand out dead connections as healthy.
+longjrm closes this by supplying the method DBUtils looks for
+(`BaseConnector.attach_liveness`, called for every pooled connection as it is
+created); the per-driver probe behind it is `ping_dbapi()`, which connectors
+override:
+
+- **Postgres** — an empty query (`PQexec("")`), one protocol round trip with no
+  cursor and no risk of opening a transaction. ~10 ms on a WAN link.
+- **DB2** — `SELECT 1 FROM SYSIBM.SYSDUMMY1`.
+- **MySQL, Oracle** — untouched; the driver's own `ping()` is used.
+- **SQLite** — no check. A connection to a local file does not go stale.
+- **SQL Server** — **not covered.** `pyodbc.Connection` is a C type that
+  accepts no new attributes, so there is nowhere to put the method. Creating a
+  DBUtils pool for SQL Server logs a warning saying so. **Use the SQLAlchemy
+  backend if your SQL Server connections can sit idle.**
+
+Detection is not free when the connection died *silently* (a dropped NAT
+mapping rather than a closed socket): the probe has to wait for the TCP
+retransmit timeout, around 20 seconds, before it can conclude anything. That
+is a property of TCP, not of the pool — but it is paid on the checkout that
+follows a long idle period. Where that matters, pass libpq's
+`tcp_user_timeout` through `options` to shorten it.
+
+### After checkout: no reconnect, no re-run
+
+Once a connection has been handed out, the pool never replaces it and never
+re-runs a statement on it. A database error reaches you as that error, and the
+transaction it happened in stays as the database left it. Both backends behave
+this way.
+
+For the DBUtils backend this changed in 0.4.0. DBUtils has a failover of its
+own: on an error it takes for a broken connection, it opens a new connection
+and runs the failed statement again. longjrm used to tell it that every
+database error was a broken connection, with these results:
+
+- Inside a transaction, an ordinary error such as a duplicate key could report
+  success. The uncommitted rows were dropped with the old connection, and the
+  re-run statement was committed alone on the new one. On MySQL the same case
+  stalled on a lock wait, and on DB2 it hung.
+- A session lost in the middle of a transaction ended the same way, with only
+  the statements after the loss committed.
+- Outside a transaction, a statement whose first attempt had already reached
+  the server could be applied a second time.
+
+That failover is now switched off, and it cannot be switched back on: a
+`failures` entry in `dbutils_opts` is ignored. What you will notice: if a connection dies
+**while you hold it**, the next statement raises the driver's error. It used to
+be retried on a new connection behind your back. Return the connection and
+check out again (a dead pooled connection is replaced at checkout, as described
+above), then retry at a level that knows whether a retry is safe.
+
+SQL Server on the DBUtils backend has no check at checkout (see above), so a
+stale pooled connection there now fails on its first statement. Use the
+SQLAlchemy backend for SQL Server.
+
+### Adding a database
+
+A new connector overrides `ping_dbapi()` if its driver has no `ping()` of its
+own and `SELECT 1` is not valid SQL for it. One rule when you do: **the probe
+must never raise `AttributeError`, `IndexError`, `TypeError` or `ValueError`.**
+Those four are exactly what DBUtils reads as "no ping available", so leaking
+one turns the check off permanently and silently. `attach_liveness` funnels
+everything into the driver's `OperationalError` for this reason;
+`longjrm/tests/liveness_test.py` guards it.
+
 ## Async Usage (FastAPI / aiohttp / Sanic)
 
 Starting with **0.2.0**, longjrm exposes an async-friendly API alongside the
@@ -495,8 +617,10 @@ async with pool.aclient() as client:
 
 The iterator holds the AsyncDb's internal lock for the lifetime of
 iteration (the underlying DB-API cursor cannot be shared). The lock is
-auto-released on exhaustion, on `break`, or on exception via the
-adapter's `aclose()`.
+released when the iterator ends or is closed: on exhaustion; after a
+`break` or an exception leaves the `async for`, where Python finalizes
+the dropped generator and the next `await` on that `AsyncDb` sees the
+release; or immediately, with `contextlib.aclosing(...)`.
 
 ### Streaming writes
 
@@ -740,6 +864,10 @@ The test suite provides comprehensive coverage of all database operations:
   - Named placeholder support (`:name`, `%(name)s`, `$name`)
   - Automatic placeholder detection and conversion
   - Cross-database placeholder compatibility
+- **`pool_contract_test.py`**: What the pool guarantees, on both backends
+  - Autocommit is on at every checkout, whatever the previous caller left
+  - After checkout a connection is never replaced and a statement never re-run
+  - Errors inside transactions, tolerant streams, sessions killed mid-use
 
 ## Project Layout
 
@@ -850,8 +978,8 @@ and triggers **only** when a GitHub Release is *published*. Normal
 ### Steps to cut a release (example: `v0.2.0`)
 
 1. **Bump version on a feature branch**:
-   - Update `VERSION` (single line: `0.2.0`)
-   - Update `pyproject.toml` `version = "0.2.0"` — must match `VERSION`
+   - Update `pyproject.toml` `version = "0.2.0"` — the only place the
+     version is set
    - Move `CHANGELOG.md` `[Unreleased]` entries under a new
      `## [0.2.0] - YYYY-MM-DD` section
    - Commit and push the branch
@@ -873,7 +1001,7 @@ and triggers **only** when a GitHub Release is *published*. Normal
 
 ### Pre-flight checklist
 
-- [ ] `VERSION` and `pyproject.toml` `version` agree
+- [ ] `pyproject.toml` `version` matches the tag you are about to push
 - [ ] `CHANGELOG.md` `[Unreleased]` is empty (or contains only items
       explicitly intended for the *next* release)
 - [ ] All tests pass against at least one real database
