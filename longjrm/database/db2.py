@@ -48,6 +48,10 @@ class Db2Db(Db):
 
         return f"select {str_column} from {table}{str_where}{str_order}{str_limit}"
 
+    def _savepoint_sql(self, name):
+        """Db2 requires the cursor-retention clause on SAVEPOINT."""
+        return f"SAVEPOINT {name} ON ROLLBACK RETAIN CURSORS"
+
     def _construct_insert_sql(self, table, str_col, values_sql, return_columns):
         """
         Db2 wrap syntax for returning columns: SELECT ... FROM FINAL TABLE (INSERT ...)

@@ -167,6 +167,16 @@ class SqlServerDb(Db):
             
         return f"select {top_clause}{str_column} from {table}{str_where}{str_order}"
 
+    def _savepoint_sql(self, name):
+        """SQL Server spells savepoints SAVE TRANSACTION / ROLLBACK TRANSACTION, and has no release."""
+        return f"SAVE TRANSACTION {name}"
+
+    def _rollback_to_savepoint_sql(self, name):
+        return f"ROLLBACK TRANSACTION {name}"
+
+    def _release_savepoint_sql(self, name):
+        return None
+
     def merge(self, table, data, key_columns, no_update=None, *, update_columns=None, bulk_size=0):
         """
         Merge (Upsert) data into table for SQL Server using MERGE statement.

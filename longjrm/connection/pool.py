@@ -14,6 +14,13 @@ from longjrm.database import get_db
 logger = logging.getLogger(__name__)
 
 
+class _NoFailover(Exception):
+    """The only "connection failure" class the DBUtils pool is given. No driver
+    raises it, so DBUtils never takes a database error for a broken connection,
+    and never swaps a connection or re-runs a statement after checkout.
+    """
+
+
 class TransactionContext:
     """
     Context object for transaction operations.
@@ -139,6 +146,14 @@ class _DBUtilsBackend(_Backend):
         }
         if dbutils_opts:
             opts.update(dbutils_opts)
+        # After checkout the connection is the caller's. DBUtils' failover --
+        # reopen the connection and re-run the failed statement -- is switched
+        # off by naming a failure class no driver raises. Inside a transaction a
+        # re-run drops the uncommitted rows and commits the retried statement
+        # alone; outside one it can apply a statement twice. A dead pooled
+        # connection is still replaced at checkout, by the ping above. Set after
+        # the caller's options on purpose: this one is not theirs to change.
+        opts["failures"] = (_NoFailover,)
 
         # Single connector instance - PooledDB calls connect() when it needs new connections
         self._connector = get_connector_class(self._cfg.type)(self._cfg)
@@ -155,11 +170,7 @@ class _DBUtilsBackend(_Backend):
             mod = load_dbapi_module(self._cfg.type)  # Pass db_type for lookup
             
             if mod:
-                # 1. Get exceptions via 'failures' option (official DBUtils arg)
-                exceptions = (mod.InterfaceError, mod.DatabaseError)
-                opts['failures'] = exceptions
-                
-                # 2. Get threadsafety
+                # Get threadsafety
                 threadsafety = getattr(mod, 'threadsafety', None)
                 
                 # Attach threadsafety to creator function (DBUtils inspection)
@@ -355,16 +366,6 @@ class Pool:
             # Set autocommit=False on the actual connection (unwrap all pooling wrappers)
             actual_conn = _unwrap_connection(raw_conn)
             get_connector_class(client['database_type']).set_dbapi_autocommit(actual_conn, False)
-
-            # Same invariant Db.set_autocommit enforces, at this layer's own
-            # autocommit-off point: autocommit off => the transaction is declared to
-            # the pooling wrapper (dbutils SteadyDB). Without it, an error inside the
-            # transaction is silently "cured" by reopening the connection and retrying
-            # the statement -- dropping every uncommitted row and landing the retry on
-            # a fresh autocommit connection.
-            begin = getattr(raw_conn, 'begin', None)
-            if callable(begin):
-                begin()
 
             # Set isolation level if specified
             if isolation_level:

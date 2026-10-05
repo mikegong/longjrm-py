@@ -102,6 +102,10 @@ class OracleDb(Db):
             
         return f"select {str_column} from {table}{str_where}{str_order}{str_limit}"
 
+    def _release_savepoint_sql(self, name):
+        """Oracle has no RELEASE SAVEPOINT; a savepoint lasts until the transaction ends."""
+        return None
+
     def bulk_load(self, table, load_info=None, *, command=None):
         """Bulk load into Oracle by DIRECT PATH -- pure SQL, no external utility.
 

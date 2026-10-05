@@ -58,6 +58,35 @@ The whole data API now obeys this (the historical `insert`/`bulk_update`/
 converted to raise). Streaming is the only `status: -1` path left. Full
 rationale: docs/database.md → "The Error Contract".
 
+## Pool contract (invariant)
+
+The pool's responsibility ends at checkout: it hands out a connection that
+is alive and has autocommit **on**. After that the connection is the
+caller's.
+
+- **Autocommit.** Every checkout sets it on, through the connector's setter
+  ([longjrm/connection/pool.py](longjrm/connection/pool.py)); what the caller
+  does with it afterwards is the caller's responsibility, and whatever was
+  left uncommitted is rolled back on return. The pool never *reads*
+  autocommit. Library helpers that turn it off for their own work (batched
+  `stream_*`, `execute_script(transaction=True)`) put back what they found,
+  which is why a connector that sets autocommit its own way must also read
+  it its own way.
+- **No failover after checkout.** A connection is never replaced and a
+  statement is never re-run. The DBUtils backend is given a failure class no
+  driver raises (`_NoFailover`) for exactly this, set after the caller's
+  `dbutils_opts` so that it cannot be overridden. Do not pass driver
+  exception classes as `failures`, and do not add `begin()`-style
+  declarations to live with failover: with it on, an ordinary SQL error
+  inside a transaction drops the uncommitted rows and commits the re-run
+  statement alone, with a success status (0.3.0 did this). A dead connection
+  is replaced *at checkout*, by the liveness ping.
+
+`longjrm/tests/pool_contract_test.py` holds both halves against live
+databases on both backends; `test_pool_no_failover.py` holds the second
+without a server. Full rationale: README → "After checkout: no reconnect,
+no re-run".
+
 ## SQL expressions in values (invariant)
 
 `Raw` ([longjrm/utils/sql.py](longjrm/utils/sql.py), exported from the

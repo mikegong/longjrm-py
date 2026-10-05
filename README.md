@@ -464,6 +464,38 @@ is a property of TCP, not of the pool — but it is paid on the checkout that
 follows a long idle period. Where that matters, pass libpq's
 `tcp_user_timeout` through `options` to shorten it.
 
+### After checkout: no reconnect, no re-run
+
+Once a connection has been handed out, the pool never replaces it and never
+re-runs a statement on it. A database error reaches you as that error, and the
+transaction it happened in stays as the database left it. Both backends behave
+this way.
+
+For the DBUtils backend this changed in 0.4.0. DBUtils has a failover of its
+own: on an error it takes for a broken connection, it opens a new connection
+and runs the failed statement again. longjrm used to tell it that every
+database error was a broken connection, with these results:
+
+- Inside a transaction, an ordinary error such as a duplicate key could report
+  success. The uncommitted rows were dropped with the old connection, and the
+  re-run statement was committed alone on the new one. On MySQL the same case
+  stalled on a lock wait, and on DB2 it hung.
+- A session lost in the middle of a transaction ended the same way, with only
+  the statements after the loss committed.
+- Outside a transaction, a statement whose first attempt had already reached
+  the server could be applied a second time.
+
+That failover is now switched off, and it cannot be switched back on: a
+`failures` entry in `dbutils_opts` is ignored. What you will notice: if a connection dies
+**while you hold it**, the next statement raises the driver's error. It used to
+be retried on a new connection behind your back. Return the connection and
+check out again (a dead pooled connection is replaced at checkout, as described
+above), then retry at a level that knows whether a retry is safe.
+
+SQL Server on the DBUtils backend has no check at checkout (see above), so a
+stale pooled connection there now fails on its first statement. Use the
+SQLAlchemy backend for SQL Server.
+
 ### Adding a database
 
 A new connector overrides `ping_dbapi()` if its driver has no `ping()` of its
@@ -832,6 +864,10 @@ The test suite provides comprehensive coverage of all database operations:
   - Named placeholder support (`:name`, `%(name)s`, `$name`)
   - Automatic placeholder detection and conversion
   - Cross-database placeholder compatibility
+- **`pool_contract_test.py`**: What the pool guarantees, on both backends
+  - Autocommit is on at every checkout, whatever the previous caller left
+  - After checkout a connection is never replaced and a statement never re-run
+  - Errors inside transactions, tolerant streams, sessions killed mid-use
 
 ## Project Layout
 
