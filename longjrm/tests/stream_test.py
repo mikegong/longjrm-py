@@ -29,6 +29,7 @@ from longjrm.config.config import JrmConfig
 from longjrm.config.runtime import configure
 from longjrm.connection.pool import Pool, PoolBackend
 from longjrm.database import get_db
+from longjrm.tests import test_utils
 
 # Configure logging to output to console
 logging.basicConfig(
@@ -46,66 +47,14 @@ def setup_test_data(db, database_type):
     # Create test tables if they don't exist (drop and recreate to ensure correct schema)
     try:
         # Drop the tables first to ensure clean schema
-        try:
-            db.execute("DROP TABLE IF EXISTS test_stream_users")
-            db.execute("DROP TABLE IF EXISTS test_stream_target")
-            print("SUCCESS: Dropped existing test tables")
-        except:
-            pass  # Tables might not exist
-        
-        if database_type in ['postgres', 'postgresql']:
-            create_table_sql = """
-            CREATE TABLE test_stream_users (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(20) DEFAULT 'active',
-                department VARCHAR(50),
-                salary DECIMAL(10,2),
-                metadata JSONB,
-                tags TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-            create_target_sql = """
-            CREATE TABLE test_stream_target (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(20),
-                department VARCHAR(50)
-            )
-            """
-        else:  # MySQL
-            create_table_sql = """
-            CREATE TABLE test_stream_users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(20) DEFAULT 'active',
-                department VARCHAR(50),
-                salary DECIMAL(10,2),
-                metadata JSON,
-                tags TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-            create_target_sql = """
-            CREATE TABLE test_stream_target (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(100),
-                email VARCHAR(100),
-                age INTEGER,
-                status VARCHAR(20),
-                department VARCHAR(50)
-            )
-            """
-        
-        db.execute(create_table_sql)
-        db.execute(create_target_sql)
+        test_utils.drop_table_silently(db, "test_stream_users")
+        test_utils.drop_table_silently(db, "test_stream_target")
+        print("SUCCESS: Dropped existing test tables")
+
+        # Both tables take the shared test_users shape for this dialect.
+        users_ddl = test_utils.get_create_table_sql(database_type, "test_users")
+        db.execute(users_ddl.replace("test_users", "test_stream_users"))
+        db.execute(users_ddl.replace("test_users", "test_stream_target"))
         print("SUCCESS: Test tables created with fresh schema")
     except Exception as e:
         print(f"WARNING: Could not create test tables: {e}")
@@ -179,14 +128,23 @@ def setup_test_data(db, database_type):
 def cleanup_test_data(db):
     """Clean up test data after tests"""
     try:
-        db.execute("DROP TABLE IF EXISTS test_stream_users")
-        db.execute("DROP TABLE IF EXISTS test_stream_target")
+        test_utils.drop_table_silently(db, "test_stream_users")
+        test_utils.drop_table_silently(db, "test_stream_target")
         print("SUCCESS: Dropped test tables")
     except Exception as e:
         print(f"WARNING: Could not clean up test data: {e}")
 
+def _pipe(db_source, stream):
+    """Hand a query stream to a write on a second connection.
+
+    SQLite's file lock lets no other connection commit while a read cursor is
+    still open (rollback-journal mode), so there the source is read to the end
+    first. Every other engine streams it straight through.
+    """
+    return list(stream) if db_source.database_type == 'sqlite' else stream
+
 def test_stream_query_sql(db_key, backend=PoolBackend.DBUTILS):
-    """Test stream_query functionality for SQL databases (MySQL/PostgreSQL)"""
+    """Test stream_query functionality for SQL databases"""
     print(f"\n=== Testing {db_key} stream_query Operations with {backend.value} backend ===")
     
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
@@ -202,8 +160,7 @@ def test_stream_query_sql(db_key, backend=PoolBackend.DBUTILS):
         
         # Set up test data
         if not setup_test_data(db, db.database_type):
-            print("ERROR: Could not set up test data, aborting tests")
-            return
+            raise RuntimeError("could not set up test data")
         
         # Test 1: Basic streaming - verify generator behavior
         print("\n--- Test 1: Basic Streaming Query ---")
@@ -309,7 +266,7 @@ def test_stream_query_sql(db_key, backend=PoolBackend.DBUTILS):
     print(f"SUCCESS: {db_key} stream_query connection closed")
 
 def test_stream_select_sql(db_key, backend=PoolBackend.DBUTILS):
-    """Test stream_select functionality for SQL databases (MySQL/PostgreSQL)"""
+    """Test stream_select functionality for SQL databases"""
     print(f"\n=== Testing {db_key} stream_select Operations with {backend.value} backend ===")
 
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
@@ -325,8 +282,7 @@ def test_stream_select_sql(db_key, backend=PoolBackend.DBUTILS):
 
         # Set up test data
         if not setup_test_data(db, db.database_type):
-            print("ERROR: Could not set up test data, aborting tests")
-            return
+            raise RuntimeError("could not set up test data")
 
         # Test 1: Basic streaming select - stream all rows (limit:0 = no cap)
         print("\n--- Test 1: Basic Streaming Select (limit:0 streams all) ---")
@@ -395,7 +351,7 @@ def test_stream_select_sql(db_key, backend=PoolBackend.DBUTILS):
     print(f"SUCCESS: {db_key} stream_select connection closed")
 
 def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
-    """Test stream_insert functionality for SQL databases (MySQL/PostgreSQL)"""
+    """Test stream_insert functionality for SQL databases"""
     print(f"\n=== Testing {db_key} stream_insert Operations with {backend.value} backend ===")
     
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
@@ -411,8 +367,7 @@ def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
         
         # Set up test data using source connection
         if not setup_test_data(db_source, db_source.database_type):
-            print("ERROR: Could not set up test data, aborting tests")
-            return
+            raise RuntimeError("could not set up test data")
         
         # Helper to get a target DB instance on a fresh connection
         from contextlib import contextmanager
@@ -426,7 +381,7 @@ def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
         
         # Create a stream from source table
         source_sql = "SELECT name, email, age, status, department FROM test_stream_users ORDER BY id"
-        source_stream = db_source.stream_query(source_sql)
+        source_stream = _pipe(db_source, db_source.stream_query(source_sql))
         
         # Insert stream into target table using a SECOND connection
         with get_target_db() as db_target:
@@ -448,7 +403,7 @@ def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
         # Test 2: Stream insert with autocommit (commit_count=0)
         print("\n--- Test 2: Stream Insert with Autocommit ---")
         
-        source_stream = db_source.stream_query(source_sql)
+        source_stream = _pipe(db_source, db_source.stream_query(source_sql))
         with get_target_db() as db_target:
             result = db_target.stream_insert(source_stream, "test_stream_target", commit_count=0)
             
@@ -525,10 +480,10 @@ def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
         print("\n--- Test 6: Full Pipeline (stream_query → stream_insert) ---")
         
         # Use stream_query output directly as input to stream_insert
-        source_stream = db_source.stream_query(
+        source_stream = _pipe(db_source, db_source.stream_query(
             "SELECT name, email, age, status, department FROM test_stream_users WHERE department = %s ORDER BY id",
             ["Engineering"]
-        )
+        ))
         
         with get_target_db() as db_target:
             result = db_target.stream_insert(source_stream, "test_stream_target", commit_count=1000)
@@ -549,7 +504,7 @@ def test_stream_insert_sql(db_key, backend=PoolBackend.DBUTILS):
     print(f"SUCCESS: {db_key} stream_insert connection closed")
 
 def test_stream_update_sql(db_key, backend=PoolBackend.DBUTILS):
-    """Test stream_update functionality for SQL databases (MySQL/PostgreSQL)"""
+    """Test stream_update functionality for SQL databases"""
     print(f"\n=== Testing {db_key} stream_update Operations with {backend.value} backend ===")
     
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
@@ -565,8 +520,7 @@ def test_stream_update_sql(db_key, backend=PoolBackend.DBUTILS):
         
         # Set up test data using source connection
         if not setup_test_data(db_source, db_source.database_type):
-            print("ERROR: Could not set up test data, aborting tests")
-            return
+            raise RuntimeError("could not set up test data")
             
         # Helper to get a target DB instance on a fresh connection
         from contextlib import contextmanager
@@ -683,10 +637,10 @@ def test_stream_update_sql(db_key, backend=PoolBackend.DBUTILS):
                     }, 0
         
         # Query source data and transform for update
-        s_stream = db_source.stream_query(
+        s_stream = _pipe(db_source, db_source.stream_query(
             "SELECT id, name, age FROM test_stream_users WHERE department = %s ORDER BY id",
             ["Engineering"]
-        )
+        ))
         
         with get_target_db() as db_target:
             result = db_target.stream_update(transform_for_update(s_stream), "test_stream_users", commit_count=1000)
@@ -725,7 +679,7 @@ def test_stream_update_sql(db_key, backend=PoolBackend.DBUTILS):
     print(f"SUCCESS: {db_key} stream_update connection closed")
 
 def test_stream_merge_sql(db_key, backend=PoolBackend.DBUTILS):
-    """Test stream_merge functionality for SQL databases (MySQL/PostgreSQL)"""
+    """Test stream_merge functionality for SQL databases"""
     print(f"\n=== Testing {db_key} stream_merge Operations with {backend.value} backend ===")
     
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
@@ -742,29 +696,8 @@ def test_stream_merge_sql(db_key, backend=PoolBackend.DBUTILS):
         # Set up test data - need a table with a unique constraint for merge
         print("\n--- Setting up test data for merge ---")
         try:
-            db_source.execute("DROP TABLE IF EXISTS test_merge_users")
-            
-            if db_source.database_type in ['postgres', 'postgresql']:
-                create_sql = """
-                CREATE TABLE test_merge_users (
-                    id SERIAL PRIMARY KEY,
-                    email VARCHAR(100) UNIQUE,
-                    name VARCHAR(100),
-                    status VARCHAR(20) DEFAULT 'active',
-                    age INTEGER
-                )
-                """
-            else:  # MySQL
-                create_sql = """
-                CREATE TABLE test_merge_users (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    email VARCHAR(100) UNIQUE,
-                    name VARCHAR(100),
-                    status VARCHAR(20) DEFAULT 'active',
-                    age INTEGER
-                )
-                """
-            db_source.execute(create_sql)
+            test_utils.drop_table_silently(db_source, "test_merge_users")
+            db_source.execute(test_utils.get_create_table_sql(db_source.database_type, "test_merge_users"))
             
             # Insert some initial data
             initial_data = [
@@ -776,7 +709,7 @@ def test_stream_merge_sql(db_key, backend=PoolBackend.DBUTILS):
             print("SUCCESS: Test merge table created with initial data")
         except Exception as e:
             print(f"ERROR: Could not set up merge test data: {e}")
-            return
+            raise
             
         # Helper to get a target DB instance on a fresh connection
         from contextlib import contextmanager
@@ -877,10 +810,10 @@ def test_stream_merge_sql(db_key, backend=PoolBackend.DBUTILS):
         
         # Create another table to sync from using source DB
         try:
-            db_source.execute("DROP TABLE IF EXISTS test_merge_source")
+            test_utils.drop_table_silently(db_source, "test_merge_source")
             db_source.execute("""
                 CREATE TABLE test_merge_source (
-                    email VARCHAR(100) PRIMARY KEY,
+                    email VARCHAR(100) NOT NULL PRIMARY KEY,
                     name VARCHAR(100),
                     status VARCHAR(20),
                     age INTEGER
@@ -897,10 +830,10 @@ def test_stream_merge_sql(db_key, backend=PoolBackend.DBUTILS):
             db_source.commit()
         except Exception as e:
             print(f"ERROR setting up source table: {e}")
-            return
+            raise
         
         # Stream from source and merge into target
-        s_stream = db_source.stream_query("SELECT email, name, status, age FROM test_merge_source ORDER BY email")
+        s_stream = _pipe(db_source, db_source.stream_query("SELECT email, name, status, age FROM test_merge_source ORDER BY email"))
         with get_target_db() as db_target:
             result = db_target.stream_merge(s_stream, "test_merge_users", ["email"], commit_count=1000)
             
@@ -915,8 +848,8 @@ def test_stream_merge_sql(db_key, backend=PoolBackend.DBUTILS):
         
         # Cleanup
         try:
-            db_source.execute("DROP TABLE IF EXISTS test_merge_users")
-            db_source.execute("DROP TABLE IF EXISTS test_merge_source")
+            test_utils.drop_table_silently(db_source, "test_merge_users")
+            test_utils.drop_table_silently(db_source, "test_merge_source")
             print("SUCCESS: Cleaned up merge test tables")
         except:
             pass
@@ -932,8 +865,9 @@ def test_error_handling():
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
     configure(cfg)
     
-    # Test with first available database
-    available_dbs = ["postgres-test", "mysql-test"]
+    # Test with first available database (honors TEST_DB / --db=)
+    available_dbs = [k for k, _ in test_utils.get_active_test_configs(cfg)
+                     if cfg.require(k).type != 'spark']
     db_key = None
     
     for test_db in available_dbs:
@@ -989,15 +923,14 @@ if __name__ == "__main__":
     print("=== JRM Stream Operations Test Suite ===")
     print("Tests: stream_query, stream_insert")
     
-    # Test database and backend combinations for stream_query
-    test_combinations = [
-        ("postgres-test", PoolBackend.DBUTILS),
-        ("postgres-test", PoolBackend.SQLALCHEMY),
-        ("mysql-test", PoolBackend.DBUTILS),
-        ("mysql-test", PoolBackend.SQLALCHEMY)
-    ]
-    
     cfg = JrmConfig.from_files("test_config/jrm.config.json", "test_config/dbinfos.json")
+
+    # Every configured database and backend (honors TEST_DB / --db=). Spark has
+    # its own suite in spark_test.py.
+    test_combinations = [
+        (db_key, backend) for db_key, backend in test_utils.get_active_test_configs(cfg)
+        if cfg.require(db_key).type != 'spark'
+    ]
     
     # Test stream_query
     print("\n" + "="*60)
